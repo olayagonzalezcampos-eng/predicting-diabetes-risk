@@ -1,0 +1,1255 @@
+---
+title: "Statistical learning: Multinomial Logistic Regression, LDA, QDA and Naive Bayes"
+author: "Patricia Cabezón Díez - Olaya González Campos - Naroa Martín Casado"
+format: 
+  html:
+    toc: true
+    toc-depth: 4
+    embed-resources: true
+editor: visual
+---
+
+# Introduction
+
+This project is based on a health-related dataset obtained from the UCI Machine Learning Repository. The dataset contains demographic information, lifestyle indicators, and medical risk factors associated with diabetes. Among the available variables, we find measures such as blood pressure, cholesterol levels, body mass index (BMI), physical activity, dietary habits, general health condition, and several socioeconomic characteristics.
+
+The response variable of interest is `Diabetes_012`, a multicategorical outcome variable that distinguishes between individuals with no diabetes, prediabetes, and diagnosed diabetes. Therefore, the problem is formulated as a multiclass classification task.
+
+The main objective of this study is to predict the target variable using the available predictors. To accomplish this goal, we will first focus on data preparation and preprocessing, ensuring appropriate data cleaning, variable transformation, and correct handling of categorical and numerical features.
+
+Next, we will conduct an Exploratory Data Analysis (EDA) to better understand the structure of the dataset, analyze the distribution of the variables, and identify the main predictors affecting the target variable.
+
+Finally, we will apply probabilistic learning methods to model the relationship between the explanatory variables and the response variable. The aim is not only to build accurate predictive models, but also to gain insight into the key health and lifestyle factors associated with different diabetes conditions.
+
+## Required Libraries
+
+We load the needed libraries and also a workspace called `workspace.RData` that contains some R objects that will allow us to generate the final pdf using `Quarto` without having to run the functions that take very times to run.
+
+```{r, warning = FALSE, message = FALSE}
+rm(list = ls()) # Clean environment
+#Upload packages
+library(tidyverse)
+library(corrplot)
+library(gridExtra)  
+library(scales)  
+library(MASS)         # LDA and QDA
+library(e1071)        # Naive Bayes
+library(caret)        # Model training and evaluation
+library(klaR)         # Visualization of classification boundaries
+library(ggplot2)
+library(GGally)
+library(patchwork)
+library(nnet)
+library(effectsize)
+library(dplyr)
+library(ggplot2)
+library(rcompanion)
+library(tidyr)
+library(tibble)
+library(naivebayes)
+library(pROC)
+```
+
+```{r}
+load("workspace_final.RData")
+```
+
+# Dataset Overview
+
+## General Structure
+
+We begin by examining the general structure of the dataset, including the number of observations and variables.
+
+```{r}
+#Upload the dataset
+data <- read.csv("dataset_diabetes.csv", stringsAsFactors=TRUE)
+```
+
+```{r}
+# Number of observations and variables
+n_obs <- nrow(data)
+n_vars <- ncol(data)
+
+cat("The dataset contains", n_obs, "observations and", 
+    n_vars, "variables.\n")
+```
+
+It can be seen that the dataset contains 253,680 observations and 22 variables. Before proceeding with the modeling stage, it is essential to examine the type of each variable to ensure that they are handled appropriately. If the imported dataset does not accurately reflect the true nature of the variables, we transform them accordingly so that they are properly encoded for subsequent analysis.
+
+The response variable, `Diabetes_012`, is a factor with three levels, corresponding to the three diabetes categories (No Diabetes, Prediabetes, and Diabetes). Several predictors such as `HighBP`, `HighChol`, `CholCheck`, `Smoker`, `Stroke`, `HeartDiseaseorAttack`, `PhysActivity`, `Fruits`, `Veggies`, `HvyAlcoholConsump`, `AnyHealthcare`, `NoDocbcCost`, `DiffWalk`, and `Sex` are binary categorical variables coded as factors with two levels (0/1).
+
+Other predictors, such as `BMI`, `MentHlth`, and `PhysHlth`, are numeric variables and can be treated as continuous. Additionally, variables like `Age`, `Education`, and `Income` are ordinal factors, meaning that their categories follow a natural ordering and should be treated accordingly in the analysis.
+
+```{r}
+# Define variable groups
+binary_vars <- c('HighBP', 'HighChol','CholCheck','Smoker',
+                 'Stroke','HeartDiseaseorAttack','PhysActivity',
+                 'Fruits','Veggies','HvyAlcoholConsump',
+                 'AnyHealthcare','NoDocbcCost','DiffWalk','Sex')
+
+categorical_vars <- c('Diabetes_012','GenHlth','Age','Education',
+                      'Income')
+
+numeric_vars <- setdiff(names(data), c(binary_vars, categorical_vars))
+
+# Count variables
+n_binary <- length(binary_vars)
+n_categorical <- length(categorical_vars)
+n_numeric <- length(numeric_vars)
+
+cat(sprintf("The dataset is composed of:\n\n"))
+cat(sprintf("- %d binary variables\n", n_binary))
+cat(sprintf("- %d categorical (multiclass/ordinal) variables\n", n_categorical))
+cat(sprintf("- %d numerical (continuous) variables\n", n_numeric))
+```
+
+## Data Preparation: Factor Conversion
+
+In this step, categorical and binary variables are converted into factors. This transformation ensures that R correctly treats these variables as categorical instead of numerical during the modeling process.
+
+Additionally, ordinal variables such as `Age`, `Education`, and `Income` are explicitly defined as ordered factors, preserving their natural ranking structure.
+
+```{r}
+vars_factor <- c('Diabetes_012', 'HighBP', 'HighChol','CholCheck','Smoker',
+                 'Stroke','HeartDiseaseorAttack','PhysActivity', 'Fruits','Veggies',
+                 'HvyAlcoholConsump', 'AnyHealthcare','NoDocbcCost','GenHlth',
+                 'DiffWalk','Sex','Age','Education','Income')
+
+# Convert selected variables to factors
+data[vars_factor] <- lapply(data[vars_factor], as.factor)
+
+# Define ordinal variables
+data$Age <- ordered(data$Age)
+data$Education <- ordered(data$Education)
+data$Income <- ordered(data$Income)
+```
+
+## Missing Values
+
+Before proceeding with the exploratory analysis and modeling stage, we check whether the dataset contains missing values. This step is important to ensure data quality and to decide if any imputation or filtering is required.
+
+```{r}
+
+na_total <- sum(is.na(data))
+na_by_var <- colSums(is.na(data))
+
+cat(sprintf("Total missing values in the dataset: %d\n\n", na_total))
+
+if (na_total == 0) {
+  cat("No missing values were found in the dataset.\n")
+} else {
+  cat("Missing values by variable (only variables with NAs are shown):\n\n")
+  print(na_by_var[na_by_var > 0])
+}
+
+```
+
+## Sample Dataset
+
+As observed, the dataset contains 253,680 observations, which makes the computations slow due to the size of the data. To reduce runtime, we will work with a representative subsample of the dataset which contains 50,000 observations. Also, to ensure the reproducibility of the report regarding random proceedures (such as sampling), we use `set.seed()`.
+
+```{r}
+set.seed(1234)  
+df<- dplyr::sample_n(data, 50000)
+
+# Number of observations and variables
+n_obs <- nrow(df)
+n_vars <- ncol(df)
+
+cat("Now the dataset contains", n_obs, "observations and", 
+    n_vars, "variables.\n")
+```
+
+# Exploratory Data Analysis
+
+## Target Variable: `Diabetes_012`
+
+The response variable of interest in this study is `Diabetes_012`. This variable represents the diabetes status of each individual and defines the prediction task.
+
+It is a multicategorical outcome variable with three possible classes:
+
+-   **0 — No diabetes**
+-   **1 — Prediabetes**
+-   **2 — Diagnosed diabetes**
+
+Therefore, the modeling problem is formulated as a multiclass classification task, where the goal is to predict an individual's diabetes status based on demographic, lifestyle, and health-related predictors.
+
+Understanding the distribution of the target variable is essential, as potential class imbalance may affect both model performance and evaluation metrics. We begin by analyzing its frequency distribution.
+
+```{r}
+
+df %>%
+  mutate(Diabetes_012 = factor(Diabetes_012,levels = c(0,1,2),
+                               labels = c("No Diabetes",
+                                          "Prediabetes",
+                                          "Diabetes"))) %>%
+  count(Diabetes_012, name = "Frequency")
+
+
+```
+
+```{r}
+# Create labeled version of the target variable
+df_plot <- df %>%
+  mutate(Diabetes_012 = factor(Diabetes_012,
+                               levels = c(0,1,2),
+                               labels = c("No Diabetes",
+                                          "Prediabetes",
+                                          "Diabetes")))
+
+df_counts <- df_plot %>%
+  count(Diabetes_012) %>%
+  mutate(prop = n / sum(n))
+
+ggplot(df_counts, aes(x = Diabetes_012, y = n, fill = Diabetes_012)) +
+  geom_bar(stat = "identity", color = "grey30", width = 0.7) +
+  geom_text(aes(label = percent(prop, accuracy = 0.1)),
+            vjust = -0.3,
+            size = 4) +
+  scale_fill_manual(values = c("#A8DADC",
+                               "#FFD166",
+                               "#EF476F")) +
+  labs(title = "Distribution of the Target Variable",
+       subtitle = "Diabetes Status Categories",
+       x = NULL,
+       y = "Number of Individuals") +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "none", 
+    plot.title = element_text(face = "bold")
+  )
+
+
+```
+
+From the distribution of the target variable, we observe that there is a clear class imbalance. The majority of individuals belong to the No Diabetes category, while the Prediabetes class is significantly underrepresented. The Diabetes category also represents a substantially smaller proportion compared to the majority class.
+
+This imbalance may negatively affect the performance of standard classification algorithms, as many models tend to favor the majority class, potentially leading to biased predictions and poor detection of minority classes.
+
+Therefore, it may be necessary to apply techniques to address class imbalance, such as resampling strategies in order to ensure more reliable and robust predictive performance across all classes.
+
+## Numerical Variables Analysis
+
+The dataset contains a small set of continuous numerical variables, namely:
+
+-   Body Mass Index (`BMI`)
+-   Number of days of poor mental health (`MentHlth`)
+-   Number of days of poor physical health (`PhysHlth`)
+
+In order to evaluate their predictive potential, we analyze their distribution across the different categories of the target variable (`Diabetes_012`).
+
+```{r}
+num_vars <- c("BMI", "MentHlth", "PhysHlth")
+
+df_long <- df %>%
+  mutate(Diabetes_012 = factor(Diabetes_012,
+                               levels = c(0,1,2),
+                               labels = c("No Diab",
+                                          "Prediab",
+                                          "Diabetes"))) %>%
+  pivot_longer(cols = all_of(num_vars),
+               names_to = "Variable",
+               values_to = "Value")
+
+ggplot(df_long, aes(x = Diabetes_012, y = Value, fill = Diabetes_012)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  facet_wrap(~ Variable, scales = "free", ncol = 3) +
+  scale_fill_manual(values = c("#A8DADC", "#FFD166", "#EF476F")) +
+  labs(title = "Distribution of Numerical Variables by Diabetes Status",
+       x = NULL,
+       y = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none",
+        plot.title = element_text(face = "bold"))
+
+```
+
+From the graphical analysis, Body Mass Index (BMI) shows a clear increasing trend across diabetes categories, with higher median values observed in the Diabetes group. This suggests that BMI could be a strong predictor of diabetes status.
+
+Regarding mental health, the distributions are highly concentrated at zero and show substantial overlap across categories, indicating limited discriminative power.
+
+Physical health exhibits greater variability in the Diabetes group and slightly higher central tendency, suggesting a moderate association with the target variable.
+
+## Categorical and Binary Variables Analysis
+
+We now analyze the relationship between binary and categorical predictors and the target variable (`Diabetes_012`).
+
+Since these variables are categorical, we examine their conditional distribution across diabetes status using proportion-based bar plots. This allows us to assess whether the probability of belonging to a given diabetes category varies across levels of each predictor.
+
+```{r}
+
+binary_vars <- c('HighBP','HighChol','CholCheck','Smoker',
+                 'Stroke','HeartDiseaseorAttack','PhysActivity',
+                 'Fruits','Veggies','HvyAlcoholConsump',
+                 'AnyHealthcare','NoDocbcCost','DiffWalk','Sex')
+
+df$Diabetes_012 <- factor(df$Diabetes_012,
+                          levels = c(0,1,2),
+                          labels = c("No Diabetes",
+                                     "Prediabetes",
+                                     "Diabetes"))
+
+df_long_bin <- df %>%
+  pivot_longer(cols = all_of(binary_vars),
+               names_to = "Variable",
+               values_to = "Value") %>%
+  mutate(Value = factor(Value))
+
+ggplot(df_long_bin, aes(x = Value, fill = Diabetes_012)) +
+  geom_bar(position = "fill") +
+  facet_wrap(~ Variable, scales = "free_x", ncol = 4) +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_manual(values = c("#A8DADC", "#FFD166", "#EF476F")) +
+  labs(title = "Binary Variables by Diabetes Status (Proportions)",
+       x = NULL,
+       y = "Proportion",
+       fill = "Diabetes Status") +
+  theme_minimal(base_size = 11)
+
+```
+
+Several binary predictors exhibit strong associations with diabetes status. In particular, high blood pressure (HighBP), high cholesterol (HighChol), history of heart disease, stroke, and difficulty walking (DiffWalk) show substantial increases in the proportion of diagnosed diabetes when the condition is present.
+
+In contrast, variables such as healthcare access, alcohol consumption, and smoking show weaker differences across categories, indicating a more limited discriminative capacity.
+
+## Ordinal Variables Analysis
+
+In addition to continuous predictors, the dataset contains several ordinal variables, namely `Age`, `Education`, and `Income`.
+
+To evaluate their relationship with the target variable (`Diabetes_012`), we analyze the proportional distribution of diabetes status across the different levels of each ordinal predictor.
+
+```{r}
+
+ordinal_vars <- c("Age","Education","Income")
+
+df_long_ord <- df %>%
+  mutate(
+    Diabetes_012 = case_when(
+      as.character(Diabetes_012) %in% c("0","No Diabetes") ~ "No Diabetes",
+      as.character(Diabetes_012) %in% c("1","Prediabetes") ~ "Prediabetes",
+      as.character(Diabetes_012) %in% c("2","Diabetes") ~ "Diabetes",
+      TRUE ~ NA_character_
+    ),
+    Diabetes_012 = factor(Diabetes_012, levels = c("No Diabetes","Prediabetes","Diabetes"))
+  ) %>%
+  pivot_longer(
+    cols = all_of(ordinal_vars),
+    names_to = "Variable",
+    values_to = "Value",
+    values_transform = list(Value = ~ as.integer(as.character(.x)))  # <- clave
+  ) %>%
+  group_by(Variable) %>%
+  mutate(Value = factor(Value, levels = sort(unique(Value), na.last = TRUE))) %>%
+  ungroup()
+
+ggplot(df_long_ord, aes(x = Value, fill = Diabetes_012)) +
+  geom_bar(position = "fill", color = "grey30") +
+  facet_wrap(~ Variable, scales = "free_x", ncol = 3) +
+  scale_y_continuous(labels = percent_format()) +
+  labs(x = NULL, y = "Proportion", fill = "Diabetes") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+Age exhibits a clear and consistent monotonic relationship with diabetes status. As age increases, the proportion of individuals diagnosed with Diabetes and Prediabetes rises progressively, while the proportion of individuals without diabetes decreases. This pattern suggests a strong association between increasing age and elevated diabetes risk.
+
+Education shows an inverse gradient. Lower educational attainment is associated with higher proportions of Diabetes and Prediabetes, whereas higher education levels correspond to a greater proportion of individuals without diabetes.
+
+A similar inverse pattern is observed for Income. Individuals in lower income categories display higher proportions of Diabetes and Prediabetes, while higher income levels are associated with lower prevalence of these conditions.
+
+## Correlation Analysis
+
+We examine the correlation structure among the continuous numerical variables in order to identify potential multicollinearity issues and relationships between predictors.
+
+```{r}
+num_vars <- df %>%
+  dplyr::select(BMI, MentHlth, PhysHlth)
+
+cor_matrix <- cor(num_vars, use = "complete.obs")
+
+corrplot::corrplot(cor_matrix,
+                   method = "color",
+                   type = "upper",
+                   addCoef.col = "black",
+                   tl.col = "black",
+                   tl.srt = 45)
+
+```
+
+### Correlation between numerical and Diabetes_012
+
+```{r, message=FALSE}
+# Convert target to numeric (0,1,2)
+
+num_vars <- c("BMI", "MentHlth", "PhysHlth")
+
+eta_results <- sapply(num_vars, function(var) {
+  model <- aov(as.formula(paste(var, "~ Diabetes_012")), data = df)
+  eta_squared(model)$Eta2[1]
+})
+
+eta_results
+
+```
+
+### Correlation between categorical and Diabetes_012
+
+```{r}
+
+binary_vars <- c('HighBP','HighChol','CholCheck','Smoker',
+                 'Stroke','HeartDiseaseorAttack','PhysActivity',
+                 'Fruits','Veggies','HvyAlcoholConsump',
+                 'AnyHealthcare','NoDocbcCost','DiffWalk','Sex')
+
+cramer_results <- sapply(binary_vars, function(x) {
+  tbl <- table(df[[x]], df$Diabetes_012)
+  cramerV(tbl)
+})
+
+cramer_results
+```
+
+```{r}
+all_assoc <- c(eta_results, cramer_results)
+
+sort(all_assoc, decreasing = TRUE)
+
+```
+
+To assess the relationship between each predictor and the response variable (Diabetes status), appropriate association measures were computed depending on the variable type. Cramer's V was used for checking the relationship between categorical variables and `Diabetes_012`, while Eta squared was calculated for checking the relationship between numerical variables and `Diabetes_012.`
+
+The coefficients were then ranked in descending order to identify which variables show the strongest association with diabetes status.
+
+The results indicate that clinical and cardiovascular-related variables, such as High Blood Pressure and High Cholesterol, present the highest association values. In contrast, lifestyle and demographic variables tend to show weaker associations.
+
+# Probabilistic Learning
+
+In this project, we focus on probabilistic multiclass classification for diabetes status. Instead of predicting a single label directly, the models estimate class membership probabilities for each level in `Diabetes_012`, which lets us quantify uncertainty and compare decision rules via confusion matrices and ROC-style analyses. We will evaluate and compare the following models:
+
+-   **Multiclass Logistic Regression (baseline):** a multinomial model that estimates the log-odds of each diabetes category relative to a reference class as a linear function of the predictors.
+
+-   **Linear Discriminant Analysis (LDA):** models each class with a Gaussian distribution while assuming a common covariance matrix across classes.
+
+-   **Quadratic Discriminant Analysis (QDA):** relaxes LDA’s shared-covariance assumption by allowing a different covariance matrix for each class.
+
+-   **Naive Bayes:** estimates class probabilities using conditional independence between predictors given the class, providing a simple but often competitive baseline.
+
+As mentioned earlier, our response variable `Diabetes_012` is imbalanced. As a result, these models will generally perform worse on the minority classes (in our case, class 1, which corresponds to Prediabetes), since the training objective tends to favor the majority class. We will first show how this imbalance affects classification performance, and then apply strategies to mitigate the issue.
+
+## Data Splitting into Train/Test
+
+We split the dataset into train and test sets using an 80/20 random split. The resulting partitions contain 40,000 observations for training and 10,000 observations for testing, and all models are fitted on the training set and evaluated using the test set.
+
+```{r}
+set.seed(123)
+nrow <- nrow(df) 
+ncol <- ncol(df)
+
+idx_train <- sample(nrow, size = floor(0.8 * nrow(df)))
+train_data <- df[idx_train, ]    # Train set
+test_data  <- df[-idx_train, ]   # Test set
+
+cat("Training set size:", nrow(train_data), "\n")
+cat("Test set size:", nrow(test_data), "\n")
+
+```
+
+## Multiclass Logistic Regression
+
+We include multiclass logistic regression as a baseline to benchmark the discriminant analysis methods and to make the impact of class imbalance explicit, highlighting how probability-based classifiers can achieve reasonable overall accuracy while still underperforming on the less frequent classes, which in our case play a very important role.
+
+The model is estimated on the training set using a multinomial logistic regression with 5-fold cross-validation to obtain more robust performance estimates and reduce dependence on a single data split. The final fitted model is then used to predict diabetes status in the test set. Performance is evaluated using a confusion matrix, reporting overall accuracy as well as class-specific metrics such as sensitivity and specificity, which are particularly informative under class imbalance.
+
+```{r}
+#Function for multiclass logist regression to obtain the model, predictions and the confusion matrix
+multinom_func <- function(train_data, test_data) {
+  
+  ctrl <- trainControl(method = "cv", number = 5)
+
+  # 1. Fit multinomial logistic regression
+  model <- train(Diabetes_012 ~ ., data = train_data, 
+                    method = "multinom", trace = FALSE, 
+                    trControl = ctrl)
+  
+  # 2. Predict class labels for the test set
+  preds <- predict(model, newdata = test_data, type = 'raw')
+  # 3. Generate the confusion matrix
+  cm <- caret::confusionMatrix(preds, test_data$Diabetes_012)
+  
+  # 4. Return as a list so you can access each part later
+  return(list(model = model, predictions = preds, confusion_matrix = cm))
+}
+```
+
+```{r, eval = FALSE}
+#---------------  Run Function ---------------
+# Obtain the multinomial logistic regression for orginal sample 
+# with imbalance classes in the target.
+results <- multinom_func(train_data, test_data)
+```
+
+### Analyzing the results
+
+Now we analyze the Multinomial Logistic Regression output using the imbalance dataset.
+
+```{r}
+#---------------  Save Results ---------------
+multi_model <- results$model
+multinom_pred <- results$predictions
+multi_cm <- results$confusion_matrix
+multi_cm
+```
+
+The multinomial logistic regression model achieves an overall accuracy of 84.86%. However, the No Information Rate (84.07%) represents the accuracy obtained by predicting the majority class (No Diabetes). Since the model exceeds this benchmark by less than one percentage point, the improvement in predictive performance is negligible. This suggests that the model’s accuracy is mainly given by correctly classifying the dominant class rather than by effectively distinguishing among all three categories.
+
+The result is a direct consequence of the strong class imbalance in the dataset, where more than 84% of observations belong to the majority class. In such contexts, high overall accuracy can be achieved even if the model performs poorly on minority classes. Therefore, accuracy alone is not an adequate measure of performance.
+
+Moreover, the confusion matrix reveals that the model performs very well in identifying the majority class (No Diabetes), with a sensitivity of 97.82%. This largely explains the high overall accuracy. However, performance declines substantially for the minority classes.
+
+For the Prediabetes class, the model completely fails to detect any observations (sensitivity = 0%). It never predicts this category, resulting in a balanced accuracy of 0.50, equivalent to random classification. This indicates that the model does not learn a meaningful decision boundary for this rare class.
+
+For the Diabetes class, sensitivity is only 18.78%, meaning that more than 80% of diabetic individuals are missclassified, primarily as non-diabetic. Although specificity for the Diabetes class is high (97.73%), this is largely a consequence of the class imbalance, as most individuals do not have diabetes and the model predominantly predicts the majority class. Therefore, the high specificity does not reflect strong discriminative ability for detecting diabetes.
+
+A Kappa value of 0.21 indicates weak agreement between predicted and true classes after correcting for chance agreement. This confirms that the model’s performance, beyond what would be expected due to the dominant class alone, is relatively poor.
+
+Overall, these results demonstrate that multinomial logistic regression, when applied without any correction for class imbalance, tends to favor the majority class and performs poorly in detecting minority classes. Therefore, accuracy alone is not an adequate metric in this setting, and class-specific measures such as sensitivity and balanced accuracy provide a more informative assessment of model performance.
+
+## Resampling (Undersampling and Oversampling)
+
+To address the strong class imbalance, we apply resampling on the training set so that the classifier is trained on a more balanced class distribution. We compare four settings: no resampling (baseline), random undersampling, random oversampling, and SMOTE (Synthetic Minority Over-sampling Technique), using multinomial logistic regression as the common model.
+
+With undersampling, we randomly reduce the number of the majority class observations to match the minority class size. This often increases minority-class recall, but it can also remove informative majority-class examples and increase variance. On the other hand, with oversampling, we randomly replicate minority-class observations until they match the majority class size. This can improve sensitivity for rare classes, but it may increase overfitting because duplicated observations can make patterns look more “certain” than they really are. Finally, SMOTE differs from simple oversampling by generating synthetic minority-class observations instead of duplicating existing ones, aiming to improve minority-class detection while maintaining greater variability in the data.
+
+Each resampled training set is used to fit the same multinomial model under identical cross-validation settings, and performance is evaluated on the unchanged test set. Beyond overall accuracy, we emphasize balanced accuracy and class-specific sensitivity to assess how well the model identifies prediabetes and diabetes cases under class imbalance.
+
+### Undersampling (downsampling) and Oversampling (upsampling)
+
+```{r, eval = FALSE}
+#--------------- 1. Prepare Data for Resampling ---------------
+# We use all features since the goal is model improvement
+train_x <- train_data %>% dplyr::select(-Diabetes_012)
+train_y <- train_data$Diabetes_012
+
+#--------------- 2. Perform Resampling ---------------
+# Downsampling: Reduces Class 0 and 2 to match the size of Class 1
+train_down <- caret::downSample(x = train_x, y = train_y, 
+                                yname = "Diabetes_012")
+
+# Upsampling: Increases Class 1 and 2 to match the size of Class 0
+train_up <- caret::upSample(x = train_x, y = train_y, 
+                            yname = "Diabetes_012")
+
+#--------------- 3. Train Models ---------------
+results_down <- multinom_func(train_down, test_data)
+results_up <- multinom_func(train_up, test_data)
+```
+
+```{r}
+#--------------- Save Results ---------------
+#--------------- Model ---------------
+multi_model_down <- results_down$model
+multi_model_up<- results_up$model
+
+#---------------  Predictions ---------------
+pred_base <- multinom_pred
+pred_down <- results_down$predictions
+pred_up   <- results_up$predictions
+
+#--------------- Confusion Matrices ---------------
+cm_base <- results$confusion_matrix
+cm_down <- results_down$confusion_matrix
+cm_up <- results_up$confusion_matrix
+```
+
+### SMOTE
+
+```{r, message = FALSE, eval = FALSE}
+ctrl_smote <- trainControl(method = 'cv', number = 5, sampling = 'smote')
+
+multi_mod_smote <- train(Diabetes_012 ~ .,
+                            data = train_data,
+                            method = 'multinom',
+                            trace = FALSE,
+                            trControl = ctrl_smote)
+
+```
+
+```{r}
+#--------------- Save Results ---------------
+multi_model_smote <- multi_mod_smote
+pred_smote <- predict(multi_model_smote, newdata = test_data, type = 'raw')
+levels(test_data$Diabetes_012) <- c("0", "1", "2")
+cm_smote <- caret::confusionMatrix(pred_smote, test_data$Diabetes_012)
+```
+
+### Comparison of the resampling methods
+
+Now, we are going to analyze and compare the obtained results:
+
+```{r}
+suppressPackageStartupMessages(library(rmarkdown))
+get_metrics_multiclass <- function(cm) {
+	by <- as.data.frame(cm$byClass)
+
+	get_row <- function(pattern) {
+		idx <- grep(pattern, rownames(by), ignore.case = TRUE)
+		if (length(idx) == 0) return(NA_integer_)
+		idx[1]
+	}
+
+	# column names can vary slightly; be defensive
+	precision_col <- if ('Pos Pred Value' %in% names(by)) 'Pos Pred Value' else 'Precision'
+
+	sens <- by$Sensitivity
+	spec <- by$Specificity
+	prec <- by[[precision_col]]
+
+	idx_pre <- get_row('Prediabetes')
+	idx_dia <- get_row('Diabetes')
+
+	tibble::tibble(
+		Accuracy = as.numeric(cm$overall['Accuracy']),
+		Sensitivity = mean(sens, na.rm = TRUE),
+		Specificity = mean(spec, na.rm = TRUE),
+		Precision = mean(prec, na.rm = TRUE),
+		Sens_Prediabetes = if (!is.na(idx_pre)) unname(sens[idx_pre]) else NA_real_,
+		Sens_Diabetes = if (!is.na(idx_dia)) unname(sens[idx_dia]) else NA_real_
+	)
+}
+
+resampling_results <- dplyr::bind_rows(
+	get_metrics_multiclass(cm_base) %>% dplyr::mutate(Strategy = 'No resampling'),
+	get_metrics_multiclass(cm_down) %>% dplyr::mutate(Strategy = 'Downsampling'),
+	get_metrics_multiclass(cm_up) %>% dplyr::mutate(Strategy = 'Oversampling'),
+	get_metrics_multiclass(cm_smote) %>% dplyr::mutate(Strategy = 'SMOTE')
+) %>%
+	dplyr::select(
+		Strategy,
+		Accuracy,
+		Sensitivity,
+		Specificity,
+		Precision,
+		Sens_Prediabetes,
+		Sens_Diabetes
+	)
+
+knitr::kable(resampling_results, booktabs = TRUE) # to display better the table
+```
+
+The comparison of resampling strategies highlights the trade-off between overall accuracy and minority-class detection. As discussed earlier, the high accuracy without resampling is mainly driven by the dominance of the majority class and therefore does not reflect balanced performance across the three categories.
+
+Introducing resampling substantially changes the results. While overall accuracy decreases for downsampling, oversampling, and SMOTE (to approximately 62–63%), macro sensitivity (sensitivity column of the table) improves considerably. In particular, macro sensitivity refers to the unweighted average of class-specific sensitivities (recall)
+
+$$
+\text{Macro Sensitivity} = \frac{Sens_\text{No Diabetes} + Sens_\text{Prediabetes} + Sens_\text{Diabetes}}{3}.
+$$
+
+Unlike overall accuracy, macro sensitivity treats each class equally regardless of its size, making it a more honest measure of balanced performance. The improvement here signals that the model is doing a better job of actually identifying cases across all groups rather than defaulting to the majority class.
+
+Oversampling stands out as the strongest performer, achieving the highest macro sensitivity and the largest gains in minority-class detection: prediabetes sensitivity rises to roughly 33% and diabetes sensitivity to around 65%. SMOTE produces comparable results but offers no clear advantage over simple random oversampling in this setting. Downsampling also improves minority-class recall, though it falls slightly short of oversampling on the key sensitivity measures.
+
+Overall, we have seen that resampling shifts the model's priorities, sacrificing some overall accuracy in exchange for better coverage of the classes that matter most clinically. Among the evaluated methods, random oversampling provides the best balance between minority-class detection and overall performance, so we will use it for the subsequent analysis.
+
+For the oversampling multinomial logistic regression model, accuracy is 0.633, macro sensitivity is 0.526, prediabetes sensitivity rises to 0.333, and diabetes to 0.646, showing a substantial improvement in detecting relevant cases. Although precision decreases (≈ 0.445), this is consistent with the model predicting minority classes more often, trading fewer missed cases for more false positives.
+
+Below we can see the confusion matrix of the multinomial logistic regression model with oversampling:
+
+```{r}
+# ---- confusion matrix ----
+cm_up
+```
+
+## Linear Discriminant Analysis (LDA)
+
+In our case, LDA models the predictors for each diabetes category in `Diabetes_012` as coming from a multivariate normal distribution and assumes that all classes share the same covariance structure. Under these assumptions, the method produces linear decision boundaries between the three classes, making it a relatively simple and interpretable probabilistic classifier. The model is trained on the randomly oversampled training set to mitigate class imbalance, and its performance is evaluated using 5-fold cross-validation to obtain more robust estimates.
+
+-   **Prior probabilities** are the class proportions in the training set. With the imbalanced dataset, the larger classes would get higher priors by default, biasing LDA toward predicting the majority class. This is why we address the class imbalance before applying the method.
+-   **Group means** are the per-class averages of each predictor, that is, the estimated class “centers” in feature space.
+-   **Scaling coefficients** (the discriminant loadings) define the linear combinations of predictors that form the discriminant axes used to separate the classes.
+-   **Geometric view:** under the shared-covariance assumption, LDA classifies a point by comparing how close it is to each class center using Mahalanobis distance computed with the pooled covariance matrix (and, more generally, it also shifts the decision boundaries according to the class priors).
+
+```{r}
+lda_func <- function(train_data, test_data) {
+  
+  ctrl <- trainControl(method = "cv", number = 5)
+  # ---------------- LDA model ----------------
+
+  model <- caret::train(Diabetes_012 ~ .,
+                       data = train_data,
+                       method = "lda",
+                       trControl = ctrl)
+  
+  # ---------------- Predictions ----------------
+  pred <- predict(model, newdata = test_data)
+  
+  # Confusion matrix
+  cm <- caret::confusionMatrix(pred, test_data$Diabetes_012)
+  
+  return(list(
+    model = model,
+    predictions = pred,
+    confusion_matrix = cm
+  ))
+}
+```
+
+```{r, eval = FALSE}
+#---------------  Run Function ---------------
+lda_results_up <- lda_func(train_up, test_data)
+```
+
+### Analyzing the results
+
+Now we analyze the LDA output by examining the class priors, group means, discriminant scaling coefficients, and the confusion matrix to understand both the model’s assumptions and its classification performance.
+
+```{r}
+#--------------- Save Results ---------------
+lda_up <- lda_results_up$model
+lda_model_up <- lda_up$finalModel
+lda_pred_up  <- lda_results_up$predictions
+lda_cm_up    <- lda_results_up$confusion_matrix
+```
+
+```{r}
+cat("Prior probabilities:\n")
+print(round(lda_model_up$prior, 4))
+```
+
+The equal prior probabilities (0.333 for each class) indicate that, due to upsampling, the LDA model was trained on a balanced dataset and therefore assigns equal importance to all three classes instead of favoring the original majority class.
+
+```{r}
+cat("\nGroup means (first 6 variables):\n")
+print(round(lda_model_up$means[, 1:min(6, ncol(lda_model_up$means))], 3))
+```
+
+The group means represent the average value of each predictor within each class and show how the variables differ across diabetes categories. For example, the mean values of HighBP1, HighChol1, BMI, and Stroke1 increase from No Diabetes to Prediabetes and are highest for Diabetes. This pattern suggests that these risk factors are positively associated with disease severity and contribute to the separation of the classes in the LDA model.
+
+```{r}
+cat("\nLinear discriminant coefficients (first 10 variables):\n")
+print(round(lda_model_up$scaling[1:min(10, nrow(lda_model_up$scaling)), ], 4))
+```
+
+The linear discriminant coefficients represent the weights assigned to each predictor in the discriminant functions. Larger absolute values indicate a stronger contribution to class separation, while the sign determines the direction of the relationship.
+
+```{r}
+# ---- Variable importance for LD1 and LD2 ----
+get_ld_importance <- function(lda_model, ld_name) {
+  contrib <- abs(lda_model$scaling[, ld_name])
+
+  tibble::tibble(
+    Variable = names(contrib),
+    Contribution = round(contrib, 4)
+  ) %>%
+    dplyr::arrange(dplyr::desc(Contribution)) %>%
+    dplyr::slice(1:10)
+}
+
+ld1_table <- get_ld_importance(lda_model_up, 'LD1')
+ld2_table <- get_ld_importance(lda_model_up, 'LD2')
+
+knitr::kable(ld1_table, 
+             booktabs = TRUE,  
+             digits = 4)        
+```
+
+**LD1 table:** The first discriminant function (LD1) is primarily driven by age and general health indicators (Age.L, GenHlth4–5), followed by cholesterol checks and blood pressure, suggesting that overall health status and cardiovascular risk factors are the main dimensions separating the classes along this axis.
+
+```{r}
+knitr::kable(ld2_table, 
+             booktabs = TRUE,  
+             digits = 4) 
+```
+
+**LD2 table:** The second discriminant function (LD2) is strongly influenced by age components, general health, education, and cardiovascular conditions (heart disease and stroke), indicating that this axis captures additional variation related to health severity and socio-demographic factors that further differentiate the diabetes categories.
+
+```{r}
+# ---- confusion matrix ----
+lda_cm_up
+```
+
+The LDA model trained on upsampled data achieves a more balanced performance across classes, with overall accuracy of 61.47%. Sensitivity improves for the minority classes (prediabetes 36.36%, diabetes 56.77%), while No Diabetes sensitivity is 62.84%, reducing bias toward the majority class. Balanced accuracy is relatively even across classes (0.73, 0.57, 0.70), though prediabetes precision remains very low (3.28%).
+
+Compared to the multinomial regression model with oversampling, LDA has slightly lower overall accuracy (61.47% vs. 63.30%) and similar macro sensitivity. Regression provides slightly higher sensitivity for the minority classes (33.3% for prediabetes and 64.6% for diabetes), while LDA offers a more even distribution of detection across all classes. Both methods improve minority-class detection substantially, but LDA emphasizes overall balance, whereas regression slightly favors minority sensitivity, being a better choice for correctly detecting the minority classes (Diabetes and Prediabetes), which is the clinical priority.
+
+### Graphical Representation
+
+Some decisions had to be taken regarding model training for visualization. We trained a second LDA model uisng `MASS::lda()` extract the discriminant coordinates (LD1 and LD2) only for visualization. The performance evaluation remains based on the cross-validated `caret` model. Since both implementations use the same LDA methodology and training data, this does not affect the results or their interpretation.
+
+```{r}
+#---------------Visualizing the Linear Discriminant----------------
+# Project data onto the linear discriminant
+
+# Train LDA directly using MASS (for visualization only)
+lda_model_viz <- MASS::lda(Diabetes_012 ~ ., data = train_up)
+
+lda_values <- predict(lda_model_viz, train_up)
+
+lda_viz <- data.frame(
+  LD1 = lda_values$x[, 1],
+  LD2 = if (ncol(lda_values$x) > 1) lda_values$x[, 2] else NA,
+  Diabetes_Status = train_up$Diabetes_012
+)
+
+# Since you have 3 classes, a 2D scatter plot of LD1 vs LD2 is usually 
+#more informative than a density plot, but I have provided both options below.
+
+# Option A: Density Plot of the first Discriminant (LD1)
+ggplot(lda_viz, aes(x = LD1, fill = Diabetes_Status)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "LDA: Projection onto LD1",
+       subtitle = "Separation of Diabetes Classes",
+       x = "Linear Discriminant 1", 
+       y = "Density") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set1")
+```
+
+```{r}
+# Scatter plot of LD1 vs LD2
+ggplot(lda_viz, aes(x = LD1, y = LD2, color = Diabetes_Status)) +
+  # 1. Plot the points with transparency (alpha) to keep the "cloud" look
+  geom_point(alpha = 0.3) +
+  
+  # 2. Add thick, solid ellipses
+  # 'linewidth' makes the lines thicker
+  # 'level = 0.95' is the confidence level (standard)
+  stat_ellipse(aes(fill = Diabetes_Status), 
+               geom = "polygon", 
+               alpha = 0.1, 
+               linewidth = 1.2) + 
+  
+  # 3. Titles and Labels
+  labs(title = "LDA: LD1 vs LD2 Space",
+       subtitle = "Visualizing class separation with emphasized confidence 
+       ellipses",
+       x = "Linear Discriminant 1",
+       y = "Linear Discriminant 2",
+       color = "Diabetes Status",
+       fill = "Diabetes Status") +
+  
+  # 4. Styling
+  theme_minimal() +
+  scale_color_brewer(palette = "Set1") +
+  scale_fill_brewer(palette = "Set1")
+```
+
+The first linear discriminant (LD1) provides clear separation between the three classes. *No Diabetes* is primarily located at negative LD1 values, *Diabetes* at positive values, and *Prediabetes* lies between them, indicating a progression pattern. Some overlap is observed, particularly between adjacent classes, which is expected in medical data where risk factors form a continuum rather than sharply distinct groups. LD2 contributes comparatively less to class separation, as can be seen in the scatterplot.
+
+## Quadratic Discriminant Analysis (QDA)
+
+QDA models the predictors for each diabetes category in `Diabetes_012` as coming from a multivariate normal distribution, but unlike LDA it allows each class to have its own covariance matrix. This extra flexibility leads to quadratic (non-linear) decision boundaries between the three classes, which can capture more complex separation patterns, at the cost of estimating more parameters and potentially overfitting when data are limited or highly imbalanced. We train the QDA model on the randomly oversampled training set to reduce class imbalance and improve minority-class detection, using 5-fold cross-validation to obtain more robust performance estimates.
+
+```{r}
+qda_func <- function(train_data, test_data) {
+  
+  ctrl <- trainControl(method = "cv", number = 5)
+  # ---------------- QDA model ----------------
+
+  model <- caret::train(Diabetes_012 ~ .,
+                       data = train_data,
+                       method = "qda",
+                       trControl = ctrl)
+  
+  # ---------------- Predictions ----------------
+  pred <- predict(model, newdata = test_data)
+  
+  # Confusion matrix
+  cm <- caret::confusionMatrix(pred, test_data$Diabetes_012)
+  
+  return(list(
+    model = model,
+    predictions = pred,
+    confusion_matrix = cm
+  ))
+}
+```
+
+```{r, eval = FALSE}
+#---------------  Run Function ---------------
+qda_results_up <- qda_func(train_up, test_data)
+```
+
+### Analyzing the results
+
+Now we analyze the QDA output by looking at the class priors, group means, and the confusion matrix to interpret the model’s behavior and evaluate its classification performance. Unlike LDA, QDA does not provide a single set of discriminant scaling coefficients, since it relies on class-specific covariance matrices and therefore produces quadratic decision boundaries.
+
+```{r}
+#--------------- Save Results ---------------
+qda_up <- qda_results_up$model
+qda_model_up <- qda_up$finalModel
+qda_pred_up  <- qda_results_up$predictions
+qda_cm_up    <- qda_results_up$confusion_matrix
+```
+
+```{r}
+cat("Prior probabilities:\n")
+print(round(qda_model_up$prior, 4))
+```
+
+Similarly to LDA, the equal prior probabilities (0.333 for each class) indicate that, due to oversampling, the QDA model assigns equal importance to all three classes.
+
+```{r}
+cat("\nGroup means (first 6 variables):\n")
+print(round(qda_model_up$means[, 1:min(6, ncol(qda_model_up$means))], 3))
+
+```
+
+The group means represent the average value of each predictor within each diabetes category under the QDA model. The results show a consistent increasing pattern across classes for several risk factors: HighBP1, HighChol1, BMI, Smoker1, and Stroke1 are lowest for No Diabetes, higher for Prediabetes, and highest for Diabetes. This gradual increase suggests a strong association between these health-related factors and disease progression. In contrast, CholCheck1 exhibits very similar mean values across all three groups, indicating that it contributes less to class separation compared to the cardiovascular and lifestyle-related variables.
+
+```{r}
+# ---- confusion matrix ----
+qda_cm_up
+```
+
+The QDA model trained on the oversampled data achieves an overall accuracy of 59.1%, lower than the LDA counterpart and well below the No Information Rate of 84.1%. This reduction reflects the model’s reduced bias toward the majority class, as it attempts to better capture the minority-class structure.
+
+Looking at the performance in each class, QDA detects Diabetes quite well (with a sensitivity of 79.7%) but it struggles to identify Prediabetes (with sensitivity only 10.1%), and the sensitivity of No Diabetes drops to 56.9%. Balanced accuracy follows a similar pattern (0.71 for No Diabetes, 0.71 for Diabetes, and just 0.52 for Prediabetes), highlighting poor discrimination for the rare class. Furthermore, precision for Prediabetes remains extremely low (3.0%), reflecting frequent false positives, and the Kappa coefficient of 0.21 indicates only modest agreement beyond chance.
+
+Overall, while QDA improves detection of Diabetes compared to previous models, it does not meaningfully improve identification of Prediabetes and underperforms LDA with oversampling. The model’s additional flexibility, through class-specific covariance matrices, does not translate into clear performance gains and may introduce instability due to the higher number of parameters. In practice, QDA favors minority-class detection for Diabetes but sacrifices overall balance and fails to address the challenge of detecting rare Prediabetes cases.
+
+### Graphical Results
+
+To visualize QDA predictions, we projected the data onto the first two linear discriminants from LDA. Since QDA doesn’t produce its own discriminant axes, this lets us show class separation in 2D while still reflecting the full QDA model trained on all predictors. Unlike limiting the model to two features, this preserves the information from the entire dataset.
+
+```{r}
+#---------------Visualizing the Quadratic Discriminant----------------
+# Use the same LDA projection for coordinates
+lda_model_viz <- MASS::lda(Diabetes_012 ~ ., data = train_up)
+lda_values <- predict(lda_model_viz, train_up)
+
+# Predict QDA classes
+qda_model_viz <- MASS::qda(Diabetes_012 ~ ., data = train_up)
+qda_values <- predict(qda_model_viz, train_up)
+
+# Build visualization dataframe
+qda_viz <- data.frame(
+  LD1 = lda_values$x[,1],
+  LD2 = if (ncol(lda_values$x) > 1) lda_values$x[,2] else NA,
+  QDA_Class = qda_values$class
+)
+
+# Plot QDA predictions in LDA space
+ggplot(qda_viz, aes(x = LD1, y = LD2, color = QDA_Class)) +
+  geom_point(alpha = 0.3) +
+  stat_ellipse(aes(fill = QDA_Class), 
+               geom = "polygon", 
+               alpha = 0.15, 
+               linewidth = 1.5) +
+  labs(title = "QDA: Classification Territories",
+       subtitle = "QDA predictions projected onto the LDA LD1/LD2 space",
+       x = "Linear Discriminant 1",
+       y = "Linear Discriminant 2",
+       color = "QDA Predicted Class",
+       fill = "QDA Predicted Class") +
+  theme_minimal() +
+  scale_color_brewer(palette = "Set1") +
+  scale_fill_brewer(palette = "Set1")
+```
+
+The plot displays each sample colored by its QDA predicted class, with ellipses outlining approximate class regions. It shows good separation between No Diabetes and Diabetes, while Prediabetes overlaps both, capturing its intermediate status. Overall, this provides a clear and faithful view of how QDA separates the classes in a reduced space.
+
+## Naive Bayes
+
+For Naive Bayes, we model *Diabetes_012* probabilistically by combining a prior for each diabetes class with class-conditional feature distributions. The key assumption is that predictors are conditionally independent given the class, so the posterior probability is obtained by multiplying the individual feature likelihoods with the prior. This makes Naive Bayes simple and fast, and it can work surprisingly well even when the independence assumption is not strictly true, but its performance can degrade when predictors are strongly correlated or when class imbalance dominates the priors. In our case, we train the model on the randomly oversampled training set to mitigate class imbalance and use 5-fold cross-validation to get more robust performance estimates.
+
+```{r}
+naiveBayes_func <- function(train_data, test_data) {
+  
+  ctrl <- trainControl(method = "cv", number = 5)
+  # ----------------Naive Bayes model ----------------
+
+  model <- caret::train(Diabetes_012 ~ .,
+                      data = train_data,
+                      method = "naive_bayes",
+                      trControl = ctrl)
+  
+  # ---------------- Predictions ----------------
+  pred <- predict(model, newdata = test_data)
+  
+  # Confusion matrix
+  cm <- caret::confusionMatrix(pred, test_data$Diabetes_012)
+  
+  return(list(
+    model = model,
+    predictions = pred,
+    confusion_matrix = cm
+  ))
+}
+```
+
+```{r}
+#---------------  Run Function ---------------
+nb_results_up <- naiveBayes_func(train_up, test_data)
+```
+
+### Analyzing the results
+
+Now we analyze the output of the Naive Bayes model by examining the class priors, group means, discriminant scaling coefficients, and the confusion matrix to understand both the model’s assumptions and its classification performance.
+
+```{r}
+#--------------- Save Results ---------------
+nb_up <- nb_results_up$model
+nb_model_up <-  nb_up$finalModel
+nb_pred_up  <- nb_results_up$predictions
+nb_cm_up    <- nb_results_up$confusion_matrix
+```
+
+```{r}
+cat("Prior probabilities:\n")
+print(round(nb_model_up$prior, 4))
+```
+
+The equal prior probabilities (0.333 for each class) indicate that, due to oversampling, the Naive Bayes model was trained on a balanced dataset and assigns equal initial weight to all three diabetes categories.
+
+```{r}
+# ---- confusion matrix ----
+nb_cm_up 
+```
+
+The Naive Bayes model trained on the oversampled data achieves an overall accuracy of 66.99%. This is lower than the No Information Rate (84.07%) but higher than QDA and comparable to LDA with resampling, reflecting reduced bias toward the majority class.
+
+Class-wise performance shows that the model detects No Diabetes reasonably well (sensitivity 69.5%) and Diabetes moderately (58.9%). However, Prediabetes remains challenging, with sensitivity only 16.7%. Balanced accuracy follows a similar pattern: 0.70 for No Diabetes, 0.69 for Diabetes, and 0.53 for Prediabetes, close to random classification. Precision for Prediabetes is extremely low (≈0.03), indicating many false positives. The Kappa coefficient (0.23) suggests modest agreement beyond chance, slightly better than QDA.
+
+Overall, Naive Bayes improves minority-class detection compared to the non-resampled model and performs more stably than QDA. Nevertheless, it continues to struggle with the rare Prediabetes class, highlighting the difficulty of separating this intermediate category.
+
+## Model Comparison
+
+We now evaluate and compare the four probabilistic models based on their predictive performance on the test set, where each model was trained on the randomly oversampled training data and tuned using 5-fold cross-validation. The comparison focuses not only on overall accuracy but also on class-specific and imbalance-robust metrics to assess their ability to detect prediabetes and diabetes cases.
+
+```{r}
+get_macro_metrics <- function(cm) {
+  by <- as.data.frame(cm$byClass)
+
+  tibble::tibble(
+    Accuracy = as.numeric(cm$overall["Accuracy"]),
+    Sensitivity = mean(by$Sensitivity, na.rm = TRUE),
+    Specificity = mean(by$Specificity, na.rm = TRUE),
+    Balanced_Accuracy = mean(by$`Balanced Accuracy`, na.rm = TRUE)
+  )
+}
+
+comparison <- dplyr::bind_rows(
+  get_macro_metrics(cm_up)      %>% dplyr::mutate(Method = "Logistic Regression"),
+  get_macro_metrics(lda_cm_up)  %>% dplyr::mutate(Method = "LDA"),
+  get_macro_metrics(qda_cm_up)  %>% dplyr::mutate(Method = "QDA"),
+  get_macro_metrics(nb_cm_up)   %>% dplyr::mutate(Method = "Naive Bayes")
+) %>%
+  dplyr::select(Method,
+                Accuracy,
+                Sensitivity,
+                Specificity,
+                Balanced_Accuracy)
+
+knitr::kable(comparison, booktabs = TRUE)
+```
+
+The model comparison highlights clear trade-offs between overall accuracy and balanced class performance under oversampling. Naive Bayes achieves the highest overall accuracy (0.6699), followed by Logistic Regression (0.6330), LDA (0.6147), and QDA (0.5911). However, accuracy alone is not the most informative metric in this imbalanced multiclass setting.
+
+When focusing on macro sensitivity, which measures the average recall across all classes, Logistic Regression performs best (0.5257), closely followed by LDA (0.5200). QDA and Naive Bayes show lower macro sensitivity (0.4889 and 0.4837, respectively), indicating weaker overall ability to detect all classes equally.
+
+Macro balanced accuracy confirms this pattern. Logistic Regression achieves the highest value (0.6712), followed closely by LDA (0.6671). QDA (0.6471) and Naive Bayes (0.6394) perform slightly worse. This suggests that Logistic Regression and LDA provide the most balanced classification performance across the three diabetes categories. In addition, Macro specificity is relatively similar across models but is slightly higher for Logistic Regression (0.8166) and LDA (0.8142), indicating better overall discrimination between classes.
+
+::: {.callout-tip appearance="simple"}
+[**Model Performance Summary:**]{.underline} Overall, although **Naive Bayes** achieves the highest accuracy, **Multinomial** **Logistic Regression** provides the best balance between sensitivity and specificity across all classes. **LDA** performs very similarly and represents a competitive alternative. **QDA**, despite its greater flexibility, does not outperform the simpler linear methods in this setting.
+:::
+
+This is illustrated in the graph below:
+
+```{r}
+comparison_long <- comparison %>%
+  tidyr::pivot_longer(
+    cols = c(Accuracy, Sensitivity, Specificity, Balanced_Accuracy),
+    names_to = "Metric",
+    values_to = "Value"
+  )
+
+ggplot(comparison_long, aes(x = Method, y = Value, fill = Metric)) +
+  geom_col(position = "dodge") +
+  labs(
+    title = "Performance Comparison of Probabilistic Classifiers\n(Oversampled, 5-fold CV)",
+    y = "Metric Value",
+    x = ""
+  ) +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set2") +
+  coord_flip() +
+  theme(legend.position = "bottom")
+```
+
+Based on the comparative results, Logistic Regression with oversampling is the preferred model. Although Naive Bayes achieves the highest overall accuracy, Logistic Regression provides the best balanced performance across classes. It attains the highest macro sensitivity and macro balanced accuracy, indicating a stronger and more consistent ability to detect all three diabetes categories.
+
+::: {.callout-tip appearance="simple"}
+In an imbalanced multiclass setting such as this one, overall accuracy can be misleading, and greater emphasis should be placed on metrics that evaluate performance more equitably across classes. Multiclass Logistic Regression offers the most stable trade-off between sensitivity and specificity while improving minority-class detection. Therefore, it is selected as the final model for subsequent analysis.
+:::
+
+### Cross-Validation comparison
+
+```{r}
+cv_results <- resamples(list(
+  Logistic_Regression = multi_model_up,
+  LDA = lda_up,
+  QDA = qda_up,
+  Naive_Bayes = nb_up
+))
+
+summary(cv_results)
+```
+
+We perform the model comparison not only on the test set but also using 5-fold cross-validation to obtain more robust estimates of predictive performance. Cross-validation averages performance across multiple resampled folds, reducing the influence of any single data split and giving a more stable assessment of model reliability.
+
+In this case, the cross-validation results are very similar to those obtained on the test set. Logistic Regression and LDA consistently outperform QDA and Naive Bayes in both accuracy and Kappa, confirming their superior and more balanced performance. Minor differences in absolute values, such as slightly lower mean accuracy in cross-validation, reflect the fact that each fold uses a smaller subset of the data for training and testing. Importantly, the overall ranking of models remains consistent, reinforcing the choice of Multiclass Logistic Regression as the final model.
+
+```{r}
+bwplot(cv_results, main = "5-Fold Cross-Validation Results (Oversampled)")
+```
+
+# ROC Curves
+
+```{r}
+# Prepare target variable and ensure levels are correctly mapped
+test_data$Diabetes_012 <- as.factor(test_data$Diabetes_012)
+levels(test_data$Diabetes_012) <- c("No Diabetes", "Prediabetes", "Diabetes")
+
+# Get model probabilities and clean column names
+multi_probs <- as.data.frame(predict(multi_model_up, newdata = test_data, type = "prob"))
+colnames(multi_probs) <- c("No Diabetes", "Prediabetes", "Diabetes") 
+
+# Create a binary outcome: Diabetes vs. All Others (Rest)
+y_bin <- factor(ifelse(test_data$Diabetes_012 == "Diabetes", "Diabetes", "No Diabetes"),
+                levels = c("No Diabetes", "Diabetes"))
+
+# Calculate ROC curve
+roc_final <- roc(
+  response = y_bin,
+  predictor = multi_probs$Diabetes, 
+  levels = c("No Diabetes", "Diabetes"),
+  direction = "<",
+  quiet = TRUE
+)
+
+# Extract data for visualization
+roc_data_final <- data.frame(
+  Sensitivity = roc_final$sensitivities,
+  Specificity = roc_final$specificities
+)
+
+# Plotting the ROC curve
+
+ggplot(roc_data_final, aes(x = 1 - Specificity, y = Sensitivity)) +
+  geom_line(linewidth = 1, color = "royalblue") +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray50") +
+  labs(
+    title = "ROC Curve: Diabetes vs. Rest",
+    subtitle = paste0("AUC = ", round(as.numeric(roc_final$auc), 4)),
+    x = "False Positive Rate (1 - Specificity)",
+    y = "True Positive Rate (Sensitivity)"
+  ) +
+  theme_minimal() +
+  coord_equal()
+
+
+```
+
+The model's AUC (Area Under the Curve) of 0.8214 means that if you randomly picked one diabetic or prediabetic patient and one non-diabetic patient, the model would correctly classify the diabetic or prediabetic patient as high risk about 82% of the time, a solid indicator of overall performance.
+
+Since missing a true diabetic or prediabetic case case (a false negative) is the bigger concern here, we want the model to lean toward sensitivity. Throughout the curve, the model stays well above the diagonal line that represents a random guess, which confirms it's genuinely adding predictive value rather than just getting lucky.
+
+# Effect of Threshold Selection
+
+## Class Imbalance Problem
+
+The dataset presents a strong class imbalance.The majority of observations correspond No Diabetes, while Prediabetes and especially Diabetes represent a much smaller proportion of the sample.
+
+In such scenarios, a standard classifier optimized for overall accuracy tends to:
+
+-   Predict the majority class frequently.
+-   Achieve high accuracy.
+-   Miss a substantial number of positive cases (Diabetes).
+
+From a medical perspective, misclassifying a patient with Diabetes as *No Diabetes* is considerably more severe than the reverse error. Therefore, accuracy alone is not an adequate performance criterion.
+
+### Threshold Adjustment
+
+Initially, we adjusted the decision rule by modifying the classification threshold.
+
+Instead of assigning the predicted class as:
+
+$\hat{y}(x) = \arg\max_k P(Y = k \mid x)$,
+
+we explored lowering the probability threshold for positive cases in order to increase sensitivity.
+
+Because the dataset is imbalanced, the default implicit threshold (selecting the maximum probability) often favors the majority class. Lowering the threshold increases detection of minority cases but reduces specificity. While this improves recall, it remains a heuristic adjustment and does not explicitly incorporate the asymmetric cost of errors.
+
+### Cost-Sensitive Decision Rule
+
+To formally account for asymmetric misclassification costs, we implemented a cost-sensitive decision rule.
+
+Let:
+
+-   $P(Y = j \mid x)$ be the predicted posterior probability of class $j$
+-   $C_{j,k}$ be the cost of predicting class $k$ when the true class is $j$
+
+The expected risk of predicting class $k$ for observation $x$ is:
+
+$R(k \mid x) = \sum_{j=1}^{K} P(Y = j \mid x) \, C_{j,k}$
+
+The optimal decision rule becomes:
+
+$\hat{y}(x) = \arg\min_k R(k \mid x)$
+
+Instead of selecting the class with maximum probability, we select the class that minimizes the expected misclassification cost.
+
+### Cost Matrix Specification
+
+We defined the following cost matrix:
+
+$C =\begin{bmatrix} 0 & 1 & 1 \\1.5 & 0 & 0.5 \\3 & 1 & 0\end{bmatrix}$
+
+Rows represent the true class, and columns represent the predicted class.
+
+Key design principles:
+
+-   Misclassifying a true Diabetes case as No Diabetes (2 $→$ 0) carries the highest penalty (3), reflecting the clinical risk of missing a diabetic patient.
+-   Misclassifying Prediabetes as No Diabetes (1 $→$ 0) carries a moderate cost (1.5), acknowledging that underestimating intermediate risk is still undesirable.
+-   Confusing Diabetes with Prediabetes (2 $→$ 1) is penalized (1), but less severely than predicting No Diabetes.
+-   Overestimating severity (e.g., predicting Diabetes when the true class is No Diabetes or Prediabetes) is penalized (cost = 1 or 0.5), but at lower levels than false negatives for Diabetes.
+
+This structure reflects a clinically informed hierarchy of errors: failing to detect Diabetes is considered more harmful than generating false positives, while intermediate missclassifications receive proportionate penalties.
+
+This structure reflects clinical priorities: It is more harmful to miss a Diabetes diagnosis than to generate a false alarm. The two methods address different aspects of the imbalance problem:
+
+-   **SMOTE** improves representation during training (better model learning).
+-   **Threshold adjustment** shifts decision boundaries heuristically.
+-   **Cost-sensitive learning** modifies the final decision rule according to clinical priorities.
+
+Thus, these techniques improve minority class learning, increase sensitivity for Diabetes and reduce clinically harmful false negatives.
+
+```{r}
+test_data$Diabetes_012 <- factor(test_data$Diabetes_012,
+                                 levels = c("No Diabetes","Prediabetes","Diabetes"))
+probs3 <- predict(multi_model_up, newdata = test_data, type = "prob")
+
+#Cost matrix
+C <- matrix(
+  c(
+    0,  1,  1,  
+    1.5,  0,  0.5,  
+    3,  1,  0   
+  ),
+  nrow = 3, byrow = TRUE
+)
+colnames(C) <- rownames(C) <- c("No Diabetes","Prediabetes","Diabetes")
+
+risk <- as.matrix(probs3) %*% C
+pred_cost <- colnames(risk)[max.col(-risk)]
+pred_cost <- factor(pred_cost, levels = levels(test_data$Diabetes_012))
+
+table(pred_cost)
+cm_cost <- confusionMatrix(pred_cost, test_data$Diabetes_012)
+cm_cost
+```
+
+The cost-sensitive model reaches an overall accuracy of 0.44, which remains below the No Information Rate due to the strong class imbalance (84% No Diabetes). The key result of this model is the very high sensitivity for the Diabetes class (0.91), meaning that the model successfully detects most true diabetic cases. This confirms that the cost-sensitive strategy effectively prioritizes reducing false negatives in the clinically critical class. As expected, this comes at the expense of lower specificity and precision for Diabetes, as well as reduced sensitivity for the majority class. This trade-off reflects the shift from maximizing overall accuracy to minimizing clinically harmful errors.
+
+It is also important to note that, in a practical scenario, the cost matrix would be constructed with the assessment of health professionals who would better help us determine how "bad" it would be to wrongly predict each class and how important it is to correctly predict each class.

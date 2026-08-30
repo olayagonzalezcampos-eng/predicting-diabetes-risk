@@ -1,0 +1,2261 @@
+---
+title: "Statistical learning: Implementation of Machine Learning tools on the Diabetes dataset"
+author: "Patricia Cabezón Díez - Olaya González Campos - Naroa Martín Casado"
+format: 
+  html:
+    toc: true
+    toc-depth: 4
+    embed-resources: true
+editor: visual
+---
+
+# 1. Introduction
+
+This project is based on a health-related dataset obtained from the UCI Machine Learning Repository. The dataset contains demographic information, lifestyle indicators, and medical risk factors associated with diabetes. Among the available variables, we find measures such as blood pressure, cholesterol levels, body mass index (BMI), physical activity, dietary habits, general health condition, and several socioeconomic characteristics.
+
+The response variable of interest is `Diabetes_012`, a multicategorical outcome variable that distinguishes between individuals with no diabetes, prediabetes, and diagnosed diabetes. Therefore, the problem is formulated as a multiclass classification task.
+
+The main objective of this study is to predict the target variable using the available predictors. To accomplish this goal, we will first focus on data preparation and preprocessing, ensuring appropriate data cleaning, variable transformation, and correct handling of categorical and numerical features.
+
+The Exploratory Data Analysis (EDA) that allows us to understand the structure of the dataset can be seen in the Midterm Project.
+
+The core of the report applies machine learning methods to predict the values of the response variable `Diabetes_012` and interpret the results when possible.
+
+## Required Libraries
+
+We load the needed libraries and also a workspace called `workspace2.RData` that contains some R objects that will allow us to avoid running the chunks of code that yield a long execution time when rendering the HTML final document using `Quarto`.
+
+```{r, warning = FALSE, message = FALSE}
+rm(list = ls()) # Clean environment
+#Upload packages
+library(tidyverse)    # Data manipulation and visualization
+library(class)        # k-NN implementation
+library(caret)        # Model training and evaluation
+library(pROC)         # ROC curve analysis
+library(ggplot2)
+library(patchwork)
+
+load("workspace2.RData") # loading workspace
+set.seed(123) # for reproducibility
+
+```
+
+# 2. Preliminary Dataset Overview
+
+We begin by examining the general structure of the dataset, including the number of observations and variables.
+
+```{r}
+#Upload the dataset
+data <- read.csv("dataset_diabetes.csv", stringsAsFactors=TRUE)
+```
+
+```{r}
+# Number of observations and variables
+n_obs <- nrow(data)
+n_vars <- ncol(data)
+
+cat("The dataset contains", n_obs, "observations and", 
+    n_vars, "variables.\n")
+```
+
+It can be seen that the dataset contains 253,680 observations and 22 variables. Before proceeding with the modeling stage, it is essential to examine the type of each variable to ensure that they are handled appropriately. If the imported dataset does not accurately reflect the true nature of the variables, we transform them accordingly so that they are properly encoded for subsequent analysis.
+
+The response variable, `Diabetes_012`, is a factor with three levels, corresponding to the three diabetes categories (No Diabetes, Prediabetes, and Diabetes). Several predictors such as `HighBP`, `HighChol`, `CholCheck`, `Smoker`, `Stroke`, `HeartDiseaseorAttack`, `PhysActivity`, `Fruits`, `Veggies`, `HvyAlcoholConsump`, `AnyHealthcare`, `NoDocbcCost`, `DiffWalk`, and `Sex` are binary categorical variables coded as factors with two levels (0/1).
+
+Other predictors, such as `BMI`, `MentHlth`, and `PhysHlth`, are numeric variables and can be treated as continuous. Additionally, variables like `Age`, `Education`, and `Income` are ordinal factors, meaning that their categories follow a natural ordering and should be treated accordingly in the analysis.
+
+```{r}
+# Define variable groups
+binary_vars <- c('HighBP', 'HighChol','CholCheck','Smoker',
+                 'Stroke','HeartDiseaseorAttack','PhysActivity',
+                 'Fruits','Veggies','HvyAlcoholConsump',
+                 'AnyHealthcare','NoDocbcCost','DiffWalk','Sex')
+
+categorical_vars <- c('Diabetes_012','GenHlth','Age','Education',
+                      'Income')
+
+numeric_vars <- setdiff(names(data), c(binary_vars, categorical_vars))
+
+# Count variables
+n_binary <- length(binary_vars)
+n_categorical <- length(categorical_vars)
+n_numeric <- length(numeric_vars)
+
+cat(sprintf("The dataset is composed of:\n\n"))
+cat(sprintf("- %d binary variables\n", n_binary))
+cat(sprintf("- %d categorical (multiclass/ordinal) variables\n", n_categorical))
+cat(sprintf("- %d numerical (continuous) variables\n", n_numeric))
+```
+
+## Data Preparation: Factor Conversion
+
+In this step, categorical and binary variables are converted into factors. This transformation ensures that R correctly treats these variables as categorical instead of numerical during the modeling process.
+
+Additionally, ordinal variables such as `Age`, `Education`, and `Income` are explicitly defined as ordered factors, preserving their natural ranking structure.
+
+```{r}
+vars_factor <- c('Diabetes_012', 'HighBP', 'HighChol','CholCheck','Smoker',
+                 'Stroke','HeartDiseaseorAttack','PhysActivity', 'Fruits','Veggies',
+                 'HvyAlcoholConsump', 'AnyHealthcare','NoDocbcCost','GenHlth',
+                 'DiffWalk','Sex','Age','Education','Income')
+
+# Convert selected variables to factors
+data[vars_factor] <- lapply(data[vars_factor], as.factor)
+
+# Define ordinal variables
+data$Age <- ordered(data$Age)
+data$Education <- ordered(data$Education)
+data$Income <- ordered(data$Income)
+
+```
+
+## Missing Values
+
+Before proceeding with the exploratory analysis and modeling stage, we check whether the dataset contains missing values. This step is important to ensure data quality and to decide if any imputation or filtering is required.
+
+```{r}
+
+na_total <- sum(is.na(data))
+na_by_var <- colSums(is.na(data))
+
+cat(sprintf("Total missing values in the dataset: %d\n\n", na_total))
+
+if (na_total == 0) {
+  cat("No missing values were found in the dataset.\n")
+} else {
+  cat("Missing values by variable (only variables with NAs are shown):\n\n")
+  print(na_by_var[na_by_var > 0])
+}
+
+```
+
+## Sample Dataset
+
+As observed, the dataset contains 253,680 observations, which makes the computations slow due to the size of the data. To reduce runtime, we will work with a representative subsample of the dataset which contains 50,000 observations. Also, to ensure the reproducibility of the report regarding random procedures (such as sampling), we use `set.seed()`.
+
+```{r}
+set.seed(1234)  
+df<- dplyr::sample_n(data, 50000)
+
+# Number of observations and variables
+n_obs <- nrow(df)
+n_vars <- ncol(df)
+
+cat("Now the dataset contains", n_obs, "observations and", 
+    n_vars, "variables.\n")
+```
+
+# 3. Machine Learning
+
+## Data Splitting into Train/Test
+
+We split the dataset into train and test sets using an 80/20 random split. The resulting partitions contain 40,000 observations for training and 10,000 observations for testing, and all models are fitted on the training set and evaluated using the test set.
+
+```{r}
+
+# Name the levels of the variable "Diabetes_012"
+df$Diabetes_012 <- factor(df$Diabetes_012,
+                          levels = c(0,1,2),
+                          labels = c("No Diabetes", "Prediabetes", "Diabetes"))
+
+n_obs_df <- nrow(df)
+
+idx_train <- sample(n_obs_df, size = floor(0.8 * n_obs_df))
+train_data <- df[idx_train, ]    # Train set
+test_data  <- df[-idx_train, ]   # Test set
+
+cat("Training set size:", nrow(train_data), "\n")
+cat("Test set size:", nrow(test_data), "\n")
+
+```
+
+## Upsampling
+
+The dataset is strongly imbalanced: roughly 84% of observations belong to the *No Diabetes* class, around 14% to *Diabetes*, and only around 2% to *Prediabetes*. All machine learning methods applied in this report are trained on the upsampled training set so that no method is evaluated under a different data regime. The test set is never touched so that it always preserves the original class proportions, making sure that evaluation reflects real-world performance.
+
+We use **upsampling** (randomly replicating minority-class observations until all classes are equally represented), which was the resampling strategy that showed the best results for this dataset in the Midterm assignment.
+
+```{r}
+#--------------- 1. Prepare Data for Resampling ---------------
+# We use all features since the goal is model improvement
+train_x <- train_data %>% dplyr::select(-Diabetes_012)
+train_y <- train_data$Diabetes_012
+#--------------- 2. Perform Resampling ---------------
+# Upsampling: Increases Class 1 and 2 to match the size of Class 0
+train_up <- caret::upSample(x = train_x, y = train_y, 
+                            yname = "Diabetes_012")
+```
+
+The effect of upsampling on the class distribution is shown below. The left panel reflects the original training set and the right panel shows the balanced training set after upsampling, where every class has equal representation. All models in this report are trained on this balanced set.
+
+```{r, fig.width=9, fig.height=4}
+# Class distribution: before vs after upsampling
+dist_before <- train_data %>%
+  count(Diabetes_012) %>%
+  mutate(Pct = n / sum(n) * 100, Dataset = "Before upsampling")
+
+dist_after <- train_up %>%
+  count(Diabetes_012) %>%
+  mutate(Pct = n / sum(n) * 100, Dataset = "After upsampling")
+
+dist_both <- bind_rows(dist_before, dist_after) %>%
+  mutate(Dataset = factor(Dataset,
+                          levels = c("Before upsampling", "After upsampling")))
+
+ggplot(dist_both, aes(x = Diabetes_012, y = Pct, fill = Diabetes_012)) +
+  geom_col(width = 0.6, show.legend = FALSE) +
+  geom_text(aes(label = sprintf("%.1f%%", Pct)),
+            vjust = -0.4, size = 3.5) +
+  facet_wrap(~ Dataset, scales = "free_y") +
+  scale_fill_brewer(palette = "Set2") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(title    = "Class Distribution Before and After Upsampling",
+       subtitle = "Training set only — test set is never resampled",
+       x = NULL, y = "Percentage (%)") +
+  theme_minimal(base_size = 11) +
+  theme(strip.text = element_text(face = "bold"))
+```
+
+## 3.1. k-Nearest Neighbors (k-NN)
+
+We need to scale the numerical predictors so that, when we apply the k-NN algorithm, none of them dominates the distance metric merely by having larger absolute values.
+
+```{r}
+# Scaling the numerical variables
+# Numerical predictors are standardised using training set means and SDs so
+# that no variable dominates the distance metric due to its scale alone.
+train_means <- colMeans(train_up[, numeric_vars])
+train_sds   <- apply(train_up[, numeric_vars], 2, sd)
+
+train_scaled <- train_up
+train_scaled[, numeric_vars] <- scale(train_up[, numeric_vars],
+                                      center = train_means,
+                                      scale  = train_sds)
+
+test_scaled <- test_data
+test_scaled[, numeric_vars] <- scale(test_data[, numeric_vars],
+                                     center = train_means,
+                                     scale  = train_sds)
+```
+
+### Decision Boundaries
+
+Now, to understand better how k-NN makes a partition of the whole space, we will plot the decision boundaries. In particular, we will create a grid of points using only the predictors `MentHlth` and `PhysHlth`, and get which class (*Diabetes*, *Prediabetes* or *No Diabetes*) would be predicted at each element of the grid. These two predictors were chosen for visualization purposes because they are continuous, which allows a smooth decision grid. They are not the most important predictors overall — as the variable importance plot in the Random Forest section will show — but they serve the illustrative purpose of this plot well.
+
+The background colors represent the decision regions established by the k-NN model trained on the upsampled data. The "Diabetes" and "Prediabetes" regions appear much larger than they would in an imbalanced model because we balanced the classes. The points, however, represent the original, imbalanced `train_data`. By adding a slight jitter and reducing point opacity (`alpha`), we can visualize the high density of "No Diabetes" observations even in areas where the model has expanded its classification boundaries to favor minority class detection.
+
+```{r, eval=FALSE}
+
+numeric_vars_vis <- c("MentHlth", "PhysHlth")
+
+train_means_vis <- colMeans(train_up[, numeric_vars_vis])
+train_sds_vis   <- apply(train_up[, numeric_vars_vis], 2, sd)
+
+# We keep this scaled version for the KNN algorithm to use (Upsampled)
+train_scaled_vis <- train_up
+train_scaled_vis[, numeric_vars_vis] <- scale(train_up[, numeric_vars_vis],
+                                              center = train_means_vis,
+                                              scale  = train_sds_vis)
+
+# Prepare a separate dataset for plotting points based on ORIGINAL train_data
+# This prevents the "overcrowding" caused by upsampling in the visual layer
+plot_points <- train_data
+plot_points[, numeric_vars_vis] <- scale(train_data[, numeric_vars_vis],
+                                         center = train_means_vis,
+                                         scale  = train_sds_vis)
+
+# Add jitter to the points so we can see the density of the overlapping data
+set.seed(123)
+plot_points$MentHlth <- plot_points$MentHlth + rnorm(nrow(plot_points), 0, 0.05)
+plot_points$PhysHlth <- plot_points$PhysHlth + rnorm(nrow(plot_points), 0, 0.05)
+
+# train_vis is used for the KNN training inside the grid calculation
+train_vis <- train_scaled_vis
+train_vis[, numeric_vars_vis] <-
+  train_vis[, numeric_vars_vis] +
+  matrix(rnorm(nrow(train_vis) * 2, 0, 1e-8), ncol = 2)
+
+x_range <- seq(min(plot_points[, "MentHlth"]) - 0.5,
+               max(plot_points[, "MentHlth"]) + 0.5,
+               length.out = 100)
+
+y_range <- seq(min(plot_points[, "PhysHlth"]) - 0.5,
+               max(plot_points[, "PhysHlth"]) + 0.5,
+               length.out = 100)
+
+grid <- expand.grid(MentHlth = x_range,
+                    PhysHlth = y_range)
+
+grid$k1 <- knn(train = train_vis[, numeric_vars_vis],
+               test  = as.matrix(grid[, numeric_vars_vis]),
+               cl    = train_up$Diabetes_012,
+               k     = 1)
+
+grid$k5 <- knn(train = train_vis[, numeric_vars_vis],
+               test  = as.matrix(grid[, numeric_vars_vis]),
+               cl    = train_up$Diabetes_012,
+               k     = 5)
+
+grid$k15 <- knn(train = train_vis[, numeric_vars_vis],
+                test  = as.matrix(grid[, numeric_vars_vis]),
+                cl    = train_up$Diabetes_012,
+                k     = 15)
+
+plot_data <- plot_points 
+
+p_k1 <- ggplot() +
+  geom_tile(data = grid,
+            aes(x = MentHlth, y = PhysHlth, fill = k1),
+            alpha = 0.3) +
+  geom_point(data = plot_data,
+             aes(x = MentHlth, y = PhysHlth, color = Diabetes_012),
+             size = 1.2, alpha = 0.4) + # Reduced size and added alpha to see density
+  labs(title = "k = 1 (High Variance)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+p_k5 <- ggplot() +
+  geom_tile(data = grid,
+            aes(x = MentHlth, y = PhysHlth, fill = k5),
+            alpha = 0.3) +
+  geom_point(data = plot_data,
+             aes(x = MentHlth, y = PhysHlth, color = Diabetes_012),
+             size = 1.2, alpha = 0.4) +
+  labs(title = "k = 5 (Balanced)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+p_k15 <- ggplot() +
+  geom_tile(data = grid,
+            aes(x = MentHlth, y = PhysHlth, fill = k15),
+            alpha = 0.3) +
+  geom_point(data = plot_data,
+             aes(x = MentHlth, y = PhysHlth, color = Diabetes_012),
+             size = 1.2, alpha = 0.4) +
+  labs(title = "k = 15 (High Bias)") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+```{r}
+# Combine plots
+(p_k1 | p_k5 | p_k15) +
+  plot_annotation(
+    title = "k-NN Decision Boundaries: Effect of k",
+    subtitle = "Background: Decision zones (Upsampled) | Points: Actual distribution (Jittered)"
+  )
+```
+
+It can be seen that for lower values of $k$ the decision boundaries tend to overfit more the datapoints, whereas for greater values of $k$ the decision boundaries are smoother.
+
+### Selecting the optimal k
+
+To determine the most effective number of neighbors for our model, we used the **Kappa statistic** as our primary evaluation metric instead of raw accuracy, given the significant class imbalance in the original dataset.
+
+To obtain a more reliable estimate, we used 3-fold cross-validation with internal upsampling via `caret::train()`, which evaluates each candidate $k$ on held-out folds that preserve the real class distribution.
+
+```{r, eval = FALSE}
+# Set up cross-validation with internal resampling
+#-------------------------------------
+# Use sampling = "up" inside trainControl so that each fold is balanced separately
+ctrl <- trainControl(
+  method = "cv", 
+  number = 3,
+  sampling = "up" 
+)
+
+# Train k-NN with automatic k selection
+# We use a sample of the original train_data to ensure validation is on real distributions
+train_small <- train_data[sample(nrow(train_data), 10000), ] 
+
+knn_cv <- train(Diabetes_012 ~ .,
+                data = train_small,
+                method = "knn",
+                trControl = ctrl,
+                preProcess = c("center", "scale"),
+                tuneGrid = data.frame(k = 1:15),
+                metric = "Kappa")
+```
+
+```{r}
+# Results
+print(knn_cv)
+```
+
+```{r}
+plot(knn_cv, main = "Cross-Validation Kappa vs k (Internal Upsampling)")
+```
+
+The cross-validation identified $k=4$ as the optimal parameter, achieving a Kappa of 0.1744. This methodology is more rigorous than a single-pass grid search: by upsampling inside each fold it prevents the model from overfitting to the artificial duplicates created during balancing, and by incorporating all 21 predictors it provides a more realistic estimate of generalization performance.
+
+Note that the CV output reports `Pre-processing: centered (45), scaled (45)` rather than 21. This is because `caret` internally expands ordered factors into a set of numeric contrasts before applying centering and scaling, which increases the number of numeric columns from 21 to 45. The underlying predictor information is the same; only the internal numeric representation changes.
+
+### Analysis of Final Results and Model Limitations
+
+After identifying the optimal $k=4$ through cross-validation, we applied this model to the original test set to evaluate its real-world performance. This step is crucial because it shows how a model trained on balanced, "artificial" data handles the actual, imbalanced proportions of a medical dataset.
+
+```{r, eval = FALSE}
+# Best model predictions
+knn_cv_pred <- predict(knn_cv, newdata = test_data)
+```
+
+```{r}
+confusionMatrix(knn_cv_pred, test_data$Diabetes_012)
+```
+
+The results from our final cross-validated k-NN model ($k=4$) reveal the significant difficulty of this classification task despite utilizing the full suite of 21 predictors and internal upsampling.
+
+Note the striking gap between the cross-validation Kappa (0.1744) and the test Kappa (−0.007). This discrepancy is explained by the train/test distribution mismatch: during cross-validation the model is always evaluated on folds that were upsampled to balanced class proportions, so the CV Kappa reflects performance on an artificially balanced distribution. At test time, however, the model faces the real imbalanced distribution (\~85% No Diabetes), and because it was trained to predict minority classes more aggressively, it systematically over-predicts *Prediabetes* and *Diabetes*, leading to performance that is no better than chance on the true distribution.
+
+-   **Accuracy and Kappa:** The **Kappa statistic (-0.007)** is essentially zero, indicating agreement no better than chance. The **Accuracy (57.09%)** is significantly lower than the No Information Rate (84.71%), meaning the model struggles to provide more value than a simple majority-class guess.
+
+-   **The Detection Gap (Sensitivity):** The model identifies only **32.14%** of diabetic cases. In a clinical screening context, this failure rate is quite poor, as it means a large fraction of the sick population would go undetected and untreated.
+
+-   **The Prediabetes Failure:** With a **Sensitivity of only 4.32%**, the model effectively fails to identify the prediabetic class. This suggests that the features for prediabetes are so heavily overlapped with the other two classes that k-NN's distance-based logic cannot distinguish them, even with upsampling.
+
+-   **Low Precision (PPV):** The **Positive Predictive Value of 13.09%** for Diabetes means that most "Diabetes" flags are false alarms. This high false-positive rate would place an unnecessary burden on healthcare resources through follow-up testing.
+
+::: callout-important
+**Final Conclusion and Model Assessment: k-NN**
+
+Overall, the use of cross-validation provided a more rigorous evaluation framework than a simple train/test split, but the results suggest that **k-NN may not be the optimal algorithm** for this dataset. The high degree of overlap between health indicators and the extreme class imbalance make it difficult for a distance-based classifier to establish clear boundaries.
+
+While the use of cross-validation and internal upsampling helped balance class representation during training, the low **Kappa (-0.007)** and **Sensitivity (32.14%)** scores on the real test set indicate that a more complex non-linear model, such as a Random Forest, might be required to achieve a clinically useful level of predictive power. It should also be noted that, for computational reasons, k-NN was trained on a subsample of 10,000 observations rather than the full upsampled training set used by the tree-based models (\~100,000 observations). As a result, any direct comparison between k-NN and tree-based methods on absolute performance metrics should be interpreted cautiously, as the evaluation conditions are not fully equivalent.
+:::
+
+## 3.2. Tree-based models
+
+Tree-based methods are a family of supervised learning algorithms that recursively partition the feature space using a series of binary decision rules. They are particularly well-suited for tabular datasets with mixed variable types, they require no feature scaling, and they naturally capture non-linear interactions between predictors.
+
+### Model Selection
+
+Not all tree-based methods are equally appropriate in our case. We used the following reasoning to decide which methods to implement and which ones were not worth the computational cost:
+
+**Methods included:**
+
+-   **Random Forest:** The natural extension of bagging where, at each split, only a random subset of $\sqrt{p}$ predictors is considered. This decorrelates the individual trees, reducing variance relative to pure bagging and typically yielding better generalization.
+-   **XGBoost:** Regularised gradient boosting with $L_1$/$L_2$ penalties, column and row sub-sampling. It is the most widely used gradient boosting library in applied machine learning and a natural benchmark. It is the preferred choice in most contexts for predicting.
+-   **LightGBM:** Leaf-wise tree growth with histogram-based split finding. Faster than XGBoost on large datasets and often competitive in predictive accuracy.
+-   **CatBoost:** Symmetric-tree gradient boosting with native ordered boosting. Particularly relevant for this dataset given the large proportion of categorical and ordinal predictors.
+
+**Methods excluded and why:**
+
+-   **Single Decision Tree:** A useful classroom baseline but a guaranteed worst performer in any ensemble comparison. The pruned tree is explored in the class notes but it adds nothing to a competitive analysis here.
+-   **Bagging** (`mtry = p`): Random Forest (RF) is generally better than Bagging in practice. By considering only a random subset of predictors at each split, RF decorrelates the trees and typically reduces variance relative to Bagging, which considers all predictors. While this advantage is not mathematically guaranteed in every possible scenario, it holds reliably on datasets like this one where many predictors carry overlapping information.
+-   **GBM** (`gbm` package): The multinomial distribution is flagged as broken in the current package version and exists only for backward compatibility. Thus, results would be unreliable.
+-   **AdaBoost** (`adabag`): Computationally slow in R, requiring a subsample of 20,000 rows to be feasible. This means it would train on less than 17% of the upsampled data, which would be an unfair comparison regarding other methods. Additionally, the SAMME algorithm is strictly older and weaker than modern gradient boosting.
+-   **BART:** The Bayesian MCMC sampler requires capping training at 10,000 rows to be computationally feasible, meaning it would see less than 10% of the training data available to every other method. Thus, any comparison would be misleading.
+
+### Data Preparation
+
+The models are trained on the upsampled training set (`train_up`) and evaluated on the original, untouched test set (`test_rf`). This is critical because the test set must preserve the real class distribution (\~84% No Diabetes, \~14% Diabetes, \~2% Prediabetes) so that evaluation reflects real-world performance. Evaluating on an upsampled test set would produce artificially optimistic minority-class metrics.
+
+Two data representations are needed: factor-native data frames for Random Forest, and integer-encoded numeric matrices for the gradient boosting libraries.
+
+::: callout-note
+**A note on hyperparameter selection**
+
+Several targeted tuning decisions were made to improve model quality without a full grid search. For Random Forest, `mtry` is selected via OOB error across four candidate values ($\{2, \lfloor\sqrt{p}\rfloor, \lfloor p/3 \rfloor, \lfloor p/2 \rfloor\}$), which is computationally free since OOB estimates are produced during training. For the three gradient boosting models, a validation set carved from the original (pre-upsampling) training data is used for early stopping, which automatically selects the number of rounds without touching the test set. All other hyperparameters (`max_depth`, regularization terms, subsampling rates) were set to well-established defaults for this problem type. CatBoost uses a lower learning rate (0.05) than XGBoost and LightGBM (0.1), reflecting its ordered boosting scheme which is more conservative by design; all three boosting models reached the 800-round ceiling without early stopping triggering, meaning val-error was still decreasing at the final iteration and further rounds would likely improve minority-class detection. A full grid search or Bayesian optimization could further improve performance but was not feasible within the computational constraints of this project.
+:::
+
+```{r, warning=FALSE, message=FALSE}
+library(randomForest)
+library(xgboost)
+library(lightgbm)
+library(catboost)   
+library(ggrepel)
+
+# Load pre-fitted models and shared objects to avoid long time running
+model_rf         <- readRDS("model_rf.rds")
+model_xgb        <- readRDS("model_xgb.rds")
+model_lgb        <- readRDS("model_lgb.rds")
+model_cat        <- readRDS("model_cat.rds")
+comparison_table <- readRDS("comparison_table.rds")
+test_rf          <- readRDS("test_rf.rds")
+X_test           <- readRDS("X_test.rds")
+class_labels     <- readRDS("class_labels.rds")
+```
+
+```{r}
+# Factor-native (Random Forest) 
+train_rf <- train_up      # upsampled training set
+
+class_labels <- levels(train_rf$Diabetes_012)
+n_classes    <- length(class_labels)   # 3
+p            <- ncol(train_rf) - 1     # 21 predictors
+
+# Integer-encoded numeric matrices (XGBoost, LightGBM, CatBoost) 
+to_num_matrix <- function(df, target = "Diabetes_012") {
+  X <- dplyr::select(df, -all_of(target))
+  X <- data.frame(lapply(X, function(col) {
+    if (is.factor(col) || is.ordered(col)) as.integer(col) else col
+  }))
+  as.matrix(X)
+}
+
+X_train     <- to_num_matrix(train_up)
+X_test      <- to_num_matrix(test_rf)
+
+y_train_int <- as.integer(train_up$Diabetes_012) - 1L  
+y_test_int  <- as.integer(test_rf$Diabetes_012)  - 1L
+```
+
+### Performance Metric Helper
+
+Given the strong class imbalance, raw accuracy is misleading: a trivial classifier that always predicts "No Diabetes" would achieve \~84% accuracy with zero clinical value. Therefore, we are going to report:
+
+-   **Kappa**: corrects for the accuracy expected by chance, robust to class imbalance.
+-   **Macro F1** *(primary ranking metric)*: arithmetic mean of per-class F1 scores, giving equal weight to each class regardless of prevalence.
+-   **Macro Balanced Accuracy**: mean of per-class balanced accuracy, another imbalance-robust summary.
+-   **Per-class sensitivity**: reveals which classes are actually being detected.
+
+```{r}
+plot_cm <- function(cm_obj, title = "") {
+  tbl <- as.data.frame(cm_obj$table)
+  colnames(tbl) <- c("Predicted", "Reference", "Freq")
+  # Row-normalise to show recall per reference class
+  tbl <- tbl %>%
+    group_by(Reference) %>%
+    mutate(Recall = Freq / sum(Freq)) %>%
+    ungroup()
+
+  ggplot(tbl, aes(x = Reference, y = Predicted, fill = Recall)) +
+    geom_tile(color = "white", linewidth = 0.6) +
+    geom_text(aes(label = sprintf("%d
+(%.0f%%)", Freq, Recall * 100)),
+              size = 3.2, lineheight = 1.2) +
+    scale_fill_gradient2(low = "#d73027", mid = "#ffffbf", high = "#1a9850",
+                         midpoint = 0.5, limits = c(0, 1),
+                         name = "Recall
+(row %)") +
+    labs(title    = title,
+         subtitle = "Diagonal = correctly classified | Off-diagonal = errors",
+         x = "True class", y = "Predicted class") +
+    theme_minimal(base_size = 11) +
+    theme(axis.text = element_text(size = 10),
+          axis.text.x = element_text(face = "bold"))
+}
+
+model_summary <- function(pred_factor, truth_factor, model_name) {
+  cm <- confusionMatrix(pred_factor, truth_factor)
+  bc <- cm$byClass
+  ov <- cm$overall
+  data.frame(
+    Model        = model_name,
+    Accuracy     = round(ov["Accuracy"],                          4),
+    Kappa        = round(ov["Kappa"],                             4),
+    Macro_F1     = round(mean(bc[, "F1"],                na.rm = TRUE), 4),
+    Macro_BalAcc = round(mean(bc[, "Balanced Accuracy"], na.rm = TRUE), 4),
+    Sens_NoDiab  = round(bc["Class: No Diabetes",  "Sensitivity"], 4),
+    Sens_PreDiab = round(bc["Class: Prediabetes",  "Sensitivity"], 4),
+    Sens_Diab    = round(bc["Class: Diabetes",     "Sensitivity"], 4),
+    row.names    = NULL, stringsAsFactors = FALSE
+  )
+}
+
+results_list <- list()
+```
+
+```{r}
+# Validation split for gradient boosting early stopping.
+# Carved from train_data (the ORIGINAL pre-upsampling training set), which is
+# still available in the environment. This ensures early stopping sees the real
+# class distribution, not the synthetic upsampled one.
+# X_train (full upsampled set) is used as the boosters' training data;
+# X_val (real distribution) is used exclusively for early stopping decisions.
+# All three boosting models share this identical split for a fair comparison.
+set.seed(123)
+val_idx   <- sample(nrow(train_data), size = floor(0.15 * nrow(train_data)))
+val_data  <- train_data[val_idx, ]   # ~6 000 rows, real class distribution
+
+X_val     <- to_num_matrix(val_data)
+y_val_int <- as.integer(val_data$Diabetes_012) - 1L
+```
+
+### Random Forest
+
+Random Forest builds on the idea of bagging by adding an extra layer of randomness. Rather than considering all 21 predictors at each split, the algorithm randomly selects only a subset of them at each node. The number of candidates considered, `mtry`, is tuned via OOB error — in this run it selects `mtry = 10` out of the four candidates $\{2,4,7,10\}$. This forces the trees to be different from one another, which reduces the correlation between them and lowers the overall variance of the ensemble. A useful side effect of the bootstrap sampling is the Out-of-Bag (OOB) error. Since each tree is trained on approximately 63.2% of the data (the expected fraction of distinct observations in a bootstrap sample), the remaining \~36.8% can be used to estimate generalization error for free, without needing a separate validation set.
+
+```{r, eval=FALSE}
+# Training
+# mtry is tuned via OOB error across four candidate values.
+# OOB estimates are computed for free during training, so no separate
+# validation set is needed — ranking 4 candidates at ntree = 50 is fast and reliable.
+mtry_grid <- c(2, floor(sqrt(p)), floor(p / 3), floor(p / 2))
+
+oob_errors <- sapply(mtry_grid, function(m) {
+  set.seed(123)
+  rf_tmp <- randomForest(Diabetes_012 ~ ., data = train_rf, mtry = m, ntree = 50)
+  rf_tmp$err.rate[50, "OOB"]
+})
+
+best_mtry <- mtry_grid[which.min(oob_errors)]   # selected: mtry = 10
+
+# sampsize: caps bootstrap sample size per class at each tree;
+# the dataset is already balanced after upsampling, so this controls
+# how many observations per class are drawn into each bootstrap, not the balance itself.
+min_class_n <- min(table(train_rf$Diabetes_012))
+samp_size   <- rep(min_class_n, n_classes)
+
+set.seed(123)
+model_rf <- randomForest(
+  Diabetes_012 ~ .,
+  data       = train_rf,
+  mtry       = best_mtry,   # tuned via OOB: 10
+  ntree      = 200,
+  sampsize   = samp_size,   # caps bootstrap size per class; dataset already balanced after upsampling
+  importance = TRUE
+)
+```
+
+```{r}
+# OOB error by class at the last tree
+cat("OOB error estimate (final tree):\n")
+print(model_rf$err.rate[nrow(model_rf$err.rate), ])
+```
+
+The OOB-based `mtry` tuning selects `mtry = 10` out of the four candidates $\{2, 4, 7, 10\}$, with OOB errors of $\{0.1608, 0.0465, 0.0299, 0.0278\}$ respectively — a clear monotone improvement as more predictors are considered at each split. This unusually high `mtry` — half the available predictors — moves the model toward bagging behaviour and likely reflects the high degree of shared information between predictors in this dataset. The OOB error is informative even before seeing the test set. The overall OOB error is around 2.4%, but this figure is evaluated on the upsampled distribution where classes are equally represented — it does not reflect performance on the real imbalanced test set. Looking at the per-class breakdown reveals the actual problem clearly. The Prediabetes OOB error is 0%, but this is not because the model is perfect, but rather because, after upsampling, the model learned to classify essentially every ambiguous observation as either No Diabetes or Diabetes, leaving Prediabetes with a collapsed decision region.
+
+```{r}
+# Predictions and confusion matrix on the test set
+pred_rf <- predict(model_rf, newdata = test_rf, type = "class")
+cm_rf   <- confusionMatrix(pred_rf, test_rf$Diabetes_012)
+print(cm_rf)
+```
+
+The confusion matrix reveals an important limitation. Random Forest achieves the highest accuracy (82.1%) and a Kappa of 0.242 of all models, yet its Prediabetes sensitivity is exactly zero (the model never predicts *Prediabetes* on the test set). This happens because upsampling alone is not enough to carve out a stable decision region for such a rare class, even with a tuned `mtry` and balanced `sampsize`. The majority vote across 200 trees consistently pushes borderline observations toward *No Diabetes* or *Diabetes*, and *Prediabetes* effectively disappears from the model's output at test time.
+
+The convergence plot below makes this visible across all 200 trees: the per-class OOB errors stabilize quickly, and the *Prediabetes* line (green) collapses to zero almost immediately, while the overall OOB error (black) is pulled down by the dominant *No Diabetes* class.
+
+```{r, fig.width=8, fig.height=4}
+# OOB error convergence across trees (per class)
+oob_df <- as.data.frame(model_rf$err.rate) %>%
+  mutate(Tree = seq_len(n())) %>%
+  tidyr::pivot_longer(cols = -Tree, names_to = "Class", values_to = "OOB_Error") %>%
+  mutate(Class = recode(Class,
+                        OOB           = "Overall (OOB)",
+                        `No Diabetes` = "No Diabetes",
+                        Prediabetes   = "Prediabetes",
+                        Diabetes      = "Diabetes"))
+
+ggplot(oob_df, aes(x = Tree, y = OOB_Error, colour = Class)) +
+  geom_line(linewidth = 0.7, alpha = 0.9) +
+  scale_colour_manual(
+    values = c("Overall (OOB)" = "black",
+               "No Diabetes"   = "#377EB8",
+               "Prediabetes"   = "#4DAF4A",
+               "Diabetes"      = "#E41A1C"),
+    name = NULL) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(title    = "Random Forest — OOB Error Convergence by Class",
+       subtitle = "Per-class error stabilises quickly; Prediabetes collapses to 0 despite tuned mtry and balanced sampsize",
+       x = "Number of trees", y = "OOB Error Rate") +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom")
+
+```
+
+```{r}
+# Variable importance: which predictors drive the classification?
+varImpPlot(model_rf, n.var = 15,
+           main = "Random Forest — Variable Importance (top 15)")
+```
+
+The variable importance plot shows that `GenHlth` (general health self-assessment), `BMI`, `Age`, and `HighBP` are consistently the most informative predictors across both mean decrease in accuracy and mean decrease in Gini impurity.
+
+```{r}
+results_list[["Random Forest"]] <- model_summary(pred_rf, test_rf$Diabetes_012,
+                                                  "Random Forest")
+```
+
+### XGBoost
+
+XGBoost is a gradient boosting algorithm that builds trees sequentially, with each new tree correcting the errors of the previous ones. On top of the standard boosting framework it adds $L_1$ and $L_2$ regularization terms to the objective function, which penalize overly complex trees and help the model generalize. It also randomly samples a fraction of the rows and columns at each iteration, introducing diversity across trees in a similar spirit to Random Forest. The objective `multi:softmax` tells the model to return a direct class prediction for each observation rather than a set of class probabilities.
+
+```{r, eval=FALSE}
+# Training
+# Trains on the full upsampled set; early stopping evaluated on X_val
+# carved from the original train_data — real class distribution, no test leakage.
+dtrain_xgb <- xgb.DMatrix(data = X_train, label = y_train_int)
+dval_xgb   <- xgb.DMatrix(data = X_val,   label = y_val_int)
+dtest_xgb  <- xgb.DMatrix(data = X_test,  label = y_test_int)
+
+set.seed(123)
+model_xgb <- xgb.train(
+  params = list(
+    objective        = "multi:softmax",
+    num_class        = n_classes,
+    eta              = 0.1,
+    max_depth        = 6,
+    subsample        = 0.8,
+    colsample_bytree = 0.8,
+    min_child_weight = 5,
+    eval_metric      = "merror"
+  ),
+  data                  = dtrain_xgb,
+  nrounds               = 800,
+  watchlist             = list(train = dtrain_xgb, val = dval_xgb),
+  early_stopping_rounds = 20,
+  verbose               = 1,
+  print_every_n         = 50,
+  seed                  = 123
+)
+```
+
+```{r}
+# Predictions on the test set
+dtest_xgb    <- xgb.DMatrix(data = X_test, label = y_test_int)
+pred_xgb_int <- predict(model_xgb, dtest_xgb)
+pred_xgb     <- factor(class_labels[pred_xgb_int + 1], levels = class_labels)
+cm_xgb       <- confusionMatrix(pred_xgb, test_rf$Diabetes_012)
+print(cm_xgb)
+```
+
+XGBoost presents a very different trade-off from Random Forest. Its overall accuracy (74.3%) is lower, but it detects **4.8% of Prediabetes cases** and **55.1% of Diabetes cases**, a more balanced behavior across classes. The Macro Balanced Accuracy (0.626) exceeds that of Random Forest (0.574), confirming that XGBoost spreads its predictive effort more evenly across all three classes despite the lower headline accuracy. Unlike Macro F1, Macro Balanced Accuracy is not affected by undefined class scores and therefore provides a fairer comparison across all models, making it the more reliable metric for ranking them in this imbalanced setting.
+
+```{r}
+results_list[["XGBoost"]] <- model_summary(pred_xgb, test_rf$Diabetes_012, "XGBoost")
+```
+
+### LightGBM
+
+LightGBM is another gradient boosting framework, but it grows trees differently from XGBoost. Instead of expanding all leaves at a given depth before moving deeper, it always splits the single leaf that reduces the loss the most, regardless of where it sits in the tree. This leaf-wise strategy tends to produce more accurate trees with fewer iterations. It also discretizes continuous features into histograms before searching for the best split, which dramatically speeds up training on large datasets compared to scanning every unique value.
+
+```{r, eval=FALSE}
+# Training
+# Reuses the same X_val split as XGBoost — both models are tuned on
+# identical held-out data for a fair comparison.
+dtrain_lgb <- lgb.Dataset(data = X_train, label = y_train_int)
+dval_lgb   <- lgb.Dataset(data = X_val,   label = y_val_int,
+                           reference = dtrain_lgb)
+
+set.seed(123)
+model_lgb <- lgb.train(
+  params = list(
+    objective        = "multiclass",
+    num_class        = n_classes,
+    learning_rate    = 0.1,
+    num_leaves       = 31,
+    feature_fraction = 0.8,
+    bagging_fraction = 0.8,
+    bagging_freq     = 5,
+    min_data_in_leaf = 20,
+    metric           = "multi_error",
+    verbose          = -1
+  ),
+  data                  = dtrain_lgb,
+  nrounds               = 800,
+  valids                = list(val = dval_lgb),
+  early_stopping_rounds = 20,
+  record                = TRUE
+)
+```
+
+```{r}
+pred_lgb_raw  <- predict(model_lgb, X_test)
+pred_lgb_prob <- matrix(pred_lgb_raw, nrow = nrow(X_test),
+                        ncol = n_classes, byrow = FALSE)
+pred_lgb_int  <- max.col(pred_lgb_prob) - 1L
+pred_lgb      <- factor(class_labels[pred_lgb_int + 1], levels = class_labels)
+cm_lgb        <- confusionMatrix(pred_lgb, test_rf$Diabetes_012)
+print(cm_lgb)
+```
+
+LightGBM achieves the highest accuracy (76.1%) and Kappa (0.294) among the boosting models, detecting **2.7% of Prediabetes cases** and **57.1% of Diabetes cases**. Its Macro Balanced Accuracy (0.632) is the second highest overall. It should be noted that both LightGBM and XGBoost reached the 800-round ceiling without early stopping triggering, meaning val-merror was still decreasing at the final iteration — both models are therefore likely under-trained, and further rounds would probably improve their minority-class detection. LightGBM's lead over XGBoost in accuracy and Kappa at the same round count is consistent with its leaf-wise growth strategy, which tends to extract more information per iteration on large datasets.
+
+```{r}
+results_list[["LightGBM"]] <- model_summary(pred_lgb, test_rf$Diabetes_012, "LightGBM")
+```
+
+### CatBoost
+
+CatBoost is a gradient boosting framework designed with categorical features in mind, making it a natural fit for this dataset where most predictors are either binary, categorical or ordinal. A common problem in standard gradient boosting is that when a tree is evaluated on the same observations used to build it, the resulting predictions are slightly biased. CatBoost addresses this through an ordered boosting scheme that processes observations sequentially, ensuring each one is always scored by a model that was built without seeing it. Its trees also grow symmetrically, applying the same split condition at every node of a given depth, which acts as a built-in form of regularization and tends to make the model more robust to noisy features.
+
+```{r, eval=FALSE}
+# Training
+# Uses val_pool (not test_pool) to avoid data leakage.
+# Early stopping via od_type/od_wait — the correct parameter names
+# for the R CatBoost binding (early_stopping_rounds is not recognised).
+train_pool <- catboost::catboost.load_pool(data = X_train, label = y_train_int)
+val_pool   <- catboost::catboost.load_pool(data = X_val,   label = y_val_int)
+test_pool  <- catboost::catboost.load_pool(data = X_test,  label = y_test_int)
+
+set.seed(123)
+model_cat <- catboost::catboost.train(
+  learn_pool = train_pool,
+  test_pool  = val_pool,
+  params = list(
+    loss_function       = "MultiClass",
+    iterations          = 800,
+    learning_rate       = 0.05,
+    depth               = 6,
+    l2_leaf_reg         = 3,
+    random_strength     = 1,
+    bagging_temperature = 1,
+    od_type             = "Iter",
+    od_wait             = 20,
+    verbose             = 50,
+    random_seed         = 123
+  )
+)
+```
+
+```{r}
+test_pool    <- catboost::catboost.load_pool(data = X_test, label = y_test_int)
+pred_cat_int <- as.integer(catboost::catboost.predict(
+  model_cat, test_pool, prediction_type = "Class"))
+pred_cat <- factor(class_labels[pred_cat_int + 1], levels = class_labels)
+cm_cat   <- confusionMatrix(pred_cat, test_rf$Diabetes_012)
+print(cm_cat)
+results_list[["CatBoost"]] <- model_summary(pred_cat, test_rf$Diabetes_012, "CatBoost")
+```
+
+CatBoost achieves the **best Macro Balanced Accuracy (0.653)** of all models and the **best Prediabetes recall (12.8%)** and best Diabetes recall (65.8%), confirming that its native handling of categorical features provides a meaningful advantage on this dataset. Like the other boosting models, it trades overall accuracy for a more balanced detection profile across the three classes.
+
+The confusion matrix heatmap for CatBoost makes the class-level errors immediately readable. Each cell shows the raw count and the row-normalized recall to see how well each true class is identified.
+
+```{r, fig.width=6, fig.height=5}
+# Confusion matrix heatmap for the recommended model (CatBoost)
+if (exists("cm_cat")) {
+  plot_cm(cm_cat, title = "CatBoost — Confusion Matrix (test set)")
+} else {
+  cat("cm_cat not available in this session (CatBoost not installed).
+")
+}
+```
+
+### Model Comparison
+
+```{r}
+comparison_table <- do.call(rbind, results_list)
+rownames(comparison_table) <- NULL
+print(comparison_table, row.names = FALSE)
+```
+
+```{r}
+cat("--- Best model by metric ---\n")
+cat(sprintf("Highest Accuracy         : %-20s (%.4f)\n",
+            comparison_table$Model[which.max(comparison_table$Accuracy)],
+            max(comparison_table$Accuracy)))
+cat(sprintf("Highest Kappa            : %-20s (%.4f)\n",
+            comparison_table$Model[which.max(comparison_table$Kappa)],
+            max(comparison_table$Kappa)))
+cat(sprintf("Highest Macro F1         : %-20s (%.4f)\n",
+            comparison_table$Model[which.max(comparison_table$Macro_F1)],
+            max(comparison_table$Macro_F1)))
+cat(sprintf("Highest Macro Bal. Acc.  : %-20s (%.4f)\n",
+            comparison_table$Model[which.max(comparison_table$Macro_BalAcc)],
+            max(comparison_table$Macro_BalAcc)))
+cat(sprintf("Best Prediabetes Recall  : %-20s (%.4f)\n",
+            comparison_table$Model[which.max(comparison_table$Sens_PreDiab)],
+            max(comparison_table$Sens_PreDiab)))
+cat(sprintf("Best Diabetes Recall     : %-20s (%.4f)\n",
+            comparison_table$Model[which.max(comparison_table$Sens_Diab)],
+            max(comparison_table$Sens_Diab)))
+```
+
+```{r, fig.width=8, fig.height=7}
+# Macro-level metrics bar chart
+metrics_long <- comparison_table %>%
+  dplyr::select(Model, Kappa, Macro_F1, Macro_BalAcc) %>%
+  tidyr::pivot_longer(cols = -Model, names_to = "Metric", values_to = "Value") %>%
+  mutate(Metric = factor(Metric,
+                         levels = c("Kappa","Macro_F1","Macro_BalAcc"),
+                         labels = c("Kappa","Macro F1","Macro Balanced Acc")))
+
+ggplot(metrics_long, aes(x = reorder(Model, Value), y = Value, fill = Model)) +
+  geom_col(width = 0.7, show.legend = FALSE) +
+  geom_text(aes(label = sprintf("%.3f", Value)), hjust = -0.1, size = 3) +
+  facet_wrap(~ Metric, ncol = 1, scales = "free_y") +
+  coord_flip() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title    = "Tree-Based Methods — Model Comparison",
+       subtitle = "Diabetes dataset | Upsampled training set | Macro-averaged metrics",
+       x = NULL, y = "Score") +
+  theme_minimal(base_size = 11) +
+  theme(strip.text = element_text(face = "bold"))
+```
+
+The bar chart summarizes the three imbalance-robust metrics for all models. Random Forest scores highest on Kappa and Macro F1, but both figures must be interpreted with caution. The high Macro F1 is a computational artifact: because Random Forest makes zero Prediabetes predictions, the Prediabetes F1 score is undefined (NaN) and is silently excluded from the macro average by `na.rm = TRUE`, meaning its Macro F1 is effectively computed over only two classes and is not directly comparable to the other models. The high Kappa, similarly, is driven almost entirely by accurate detection of the dominant *No Diabetes* class. CatBoost, LightGBM, and XGBoost all score higher on Macro Balanced Accuracy precisely because they spread their predictive effort more evenly, trading some overall accuracy for better minority class detection. Among them, CatBoost ranks first on this metric (0.653), followed by LightGBM (0.632) and XGBoost (0.626).
+
+```{r, fig.width=7, fig.height=5}
+# Plot 2: Per-class sensitivity heatmap
+sens_long <- comparison_table %>%
+  dplyr::select(Model, Sens_NoDiab, Sens_PreDiab, Sens_Diab) %>%
+  tidyr::pivot_longer(cols = -Model, names_to = "Class", values_to = "Sensitivity") %>%
+  mutate(Class = factor(Class,
+                        levels = c("Sens_NoDiab","Sens_PreDiab","Sens_Diab"),
+                        labels = c("No Diabetes","Prediabetes","Diabetes")))
+
+ggplot(sens_long, aes(x = Class, y = Model, fill = Sensitivity)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  geom_text(aes(label = sprintf("%.3f", Sensitivity)), size = 3.5) +
+  scale_fill_gradient2(low = "#d73027", mid = "#ffffbf", high = "#1a9850",
+                       midpoint = 0.5, limits = c(0,1), name = "Sensitivity") +
+  labs(title    = "Per-Class Sensitivity — All Models",
+       subtitle = "Green = good detection  |  Red = class largely missed\nPrediabetes is the extreme minority class (~2%)",
+       x = "Class", y = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(face = "bold"))
+```
+
+The heatmap makes the detection trade-off immediately visible. Random Forest is deep green for No Diabetes but completely red for Prediabetes, meaning it effectively sacrifices the minority class entirely in favor of the majority. XGBoost and LightGBM show a similar profile, with Prediabetes recalls of around 5% and 3% respectively and Diabetes recalls of around 55% and 57%, at the cost of lower No Diabetes detection. CatBoost achieves the highest Prediabetes recall (around 13%) while also posting the best Diabetes recall (65.8%), giving it the most even detection profile across all three classes.
+
+```{r, fig.width=7, fig.height=5}
+# Macro F1 vs Prediabetes recall scatter
+ggplot(comparison_table,
+       aes(x = Sens_PreDiab, y = Macro_F1, label = Model, color = Model)) +
+  geom_point(size = 4, show.legend = FALSE) +
+  ggrepel::geom_text_repel(size = 3.5, show.legend = FALSE, box.padding = 0.4) +
+  geom_vline(xintercept = 0.4, linetype = "dashed", color = "grey50") +
+  geom_hline(yintercept = max(comparison_table$Macro_F1) - 0.01,
+             linetype = "dotted", color = "grey50") +
+  scale_color_brewer(palette = "Set1") +
+  labs(title    = "Macro F1 vs Prediabetes Recall",
+       subtitle = "Upper-right corner = best trade-off\nDashed: Prediabetes recall \u2265 0.4 | Dotted: within 0.01 of best Macro F1",
+       x = "Prediabetes Sensitivity (Recall)", y = "Macro F1 (all 3 classes)") +
+  theme_minimal(base_size = 11)
+```
+
+The scatter plot captures the fundamental tension in this problem. Random Forest sits in the upper left corner with the highest Macro F1, but as discussed above, this figure is computed over only two classes due to the undefined Prediabetes F1, so its position on the vertical axis should not be read as a genuine performance advantage. Its zero Prediabetes recall makes this visually clear: it occupies a region no other model would want to be in. XGBoost and LightGBM cluster closely together in the middle-left, representing genuine but modest minority-class detection. CatBoost sits to the right of them with the highest Prediabetes recall among all models, at the cost of lower overall accuracy. Notably, no model comes close to the upper right corner where both Macro F1 and Prediabetes recall would be high simultaneously, which speaks to how difficult this classification problem truly is.
+
+::: callout-important
+**Final Conclusion and Model Assessment: Tree-Based Models**
+
+Across all models, two stand out for different reasons:
+
+-   **Random Forest** achieves the highest reported Macro F1 (0.621) and Kappa (0.242). However, the Macro F1 figure must be interpreted with caution: because Random Forest makes zero Prediabetes predictions, the Prediabetes F1 score is undefined (NaN) and is silently excluded from the macro average, meaning this score is computed over only two classes and is not directly comparable to the other models. Its Kappa, while the strongest, is also driven primarily by accurate detection of the dominant *No Diabetes* class. Most critically, its **complete failure on Prediabetes** (sensitivity = 0.000) is a serious limitation in a clinical context, where early detection of the precursor condition is arguably the most valuable outcome.
+
+-   **CatBoost** achieves the highest Macro Balanced Accuracy (0.653) and the best Prediabetes recall (12.8%) and Diabetes recall (65.8%) of all models. Unlike Macro F1, Macro Balanced Accuracy is not affected by undefined class scores and therefore provides a fairer cross-model comparison. Its native handling of categorical and ordinal predictors gives it a structural advantage on this dataset.
+
+Out of the tree-based models, we consider that **CatBoost is the most clinically useful model**: it provides the best balanced detection across all three classes and does not completely collapse on any single class. LightGBM achieves the best Kappa (0.294) and the highest accuracy among the boosting models (76.1%), making it a strong alternative if overall correctness is prioritised over minority-class detection. It is worth noting that CatBoost's balance comes at a cost: it has the lowest No Diabetes sensitivity (69.1%) of all models, meaning it generates more false alarms on the majority class in exchange for better minority class detection.
+
+It must be acknowledged, however, that even the best model here detects only **12.8% of Prediabetes cases**, which means that more than 8 out of 10 prediabetic patients would still be missed. None of the models evaluated reach a level of Prediabetes recall that would be actionable in a real clinical screening context. Improving on this would likely require richer features, alternative resampling strategies (e.g. cost-sensitive learning or SMOTE), or threshold adjustment based on a clinical cost-benefit analysis, all of which would be natural next steps.
+
+Compared to k-NN (Kappa ≈ −0.007), all tree-based methods provide a substantial improvement, confirming that ensemble and boosting approaches are far better suited to this type of high-dimensional, imbalanced, mixed-type classification problem.
+:::
+
+## 3.3. SVM
+
+Support Vector Machines (SVM) are supervised learning methods commonly used for classification problems. The central idea of SVM is to find a decision boundary that separates observations belonging to different classes while maximizing the margin between them. The margin is defined as the distance between the separating hyperplane and the closest observations from each class.
+
+Among all possible separating hyperplanes, SVM selects the one that maximizes this margin. The observations that lie closest to the decision boundary are known as support vectors, since they determine the position and orientation of the hyperplane. Because the decision boundary depends only on these points, SVM models can be relatively robust to the presence of other observations that lie further away from the boundary. In its simplest formulation, SVM constructs a linear decision boundary.
+
+### Kernel Function
+
+In many classification problems the relationship between the predictors and the response variable is not linear, meaning that the classes cannot be separated by a simple hyperplane in the original feature space. To address this limitation, SVM relies on the kernel trick, which allows the algorithm to implicitly project the data into a higher-dimensional space where a linear separation may become possible.
+
+In this project we use the **Radial Basis Function (RBF) kernel**, one of the most commonly applied kernels in classification tasks due to its flexibility in capturing nonlinear relationships between variables.
+
+The RBF kernel is defined as
+
+$$
+K(x_i, x_j) = \exp\left(-\gamma \|x_i - x_j\|^2 \right),
+$$
+
+where $x_i$ and $x_j$ represent two observations in the feature space and $\gamma$ is a tuning parameter that controls the influence of individual observations.
+
+Small values of $\gamma$ produce smoother decision boundaries, while larger values allow the model to adapt more closely to the training data. Together with the regularization parameter $C$, which controls the trade-off between margin width and classification errors, these parameters determine the flexibility of the SVM model.
+
+### Multi-Class SVM
+
+The standard SVM formulation is designed for binary classification, meaning that it separates observations into two groups. In this project, the response variable `Diabetes_012` has three possible categories:
+
+-   *No Diabetes*
+-   *Prediabetes*
+-   *Diabetes*
+
+Since the goal is to predict these three classes, the SVM algorithm must be adapted to a multi-class framework. Two common strategies are typically used for this purpose.
+
+### One-vs-One Strategy
+
+The **One-vs-One (OvO)** strategy consists of training a classifier for each possible pair of classes. If the problem contains $k$ classes, the total number of classifiers that must be trained is given by
+
+$$
+\frac{k(k-1)}{2}.
+$$
+
+Each classifier focuses only on distinguishing between two classes, ignoring the rest. During prediction, each classifier produces a vote for one of the two classes it was trained on. The final predicted class is obtained through a majority voting rule across all classifiers.
+
+For the present dataset, where $k = 3$, three binary classifiers are constructed:
+
+-   No Diabetes vs Prediabetes\
+-   No Diabetes vs Diabetes\
+-   Prediabetes vs Diabetes
+
+This strategy is widely used in practice because it often provides good predictive performance.
+
+### One-vs-All Strategy
+
+An alternative approach is the **One-vs-All (OvA)** strategy. In this case, a separate classifier is trained for each class, where the observations belonging to that class are treated as the positive class and all remaining observations are grouped together as the negative class.
+
+If the dataset contains $k$ classes, this strategy requires training $k$ classifiers. In our case, three classifiers would be estimated:
+
+-   No Diabetes vs All\
+-   Prediabetes vs All\
+-   Diabetes vs All
+
+For prediction, each classifier produces a score that reflects how likely an observation belongs to its corresponding class, and the class with the highest score is selected.
+
+### Multi-Class SVM Implementation
+
+As explained above, SVM is inherently a binary classifier, but it can be extended to multiclass classification through decomposition strategies. In this project, the implementation is carried out using the `svm()` function from the `e1071` package, which handles the multiclass setting internally through the One-vs-One approach.
+
+To fit the model, we use the upsampled training set `train_up` and evaluate the final performance on `test_data`. Since the radial kernel depends on hyperparameters, a grid search with cross-validation is performed in order to select the best combination of `cost` and `gamma`.
+
+### Hyperparameter Selection
+
+When using the radial kernel, the SVM model depends on two main hyperparameters: the **cost parameter** $C$ and the **kernel parameter** $\gamma$. These parameters control the flexibility of the decision boundary and therefore strongly affect the predictive performance of the model.
+
+The cost parameter $C$ determines the penalty assigned to classification errors in the training data. In the SVM optimization problem, the objective can be expressed as
+
+$$
+\min_{w,b,\xi} \frac{1}{2} \|w\|^2 + C \sum_{i=1}^{n} \xi_i
+$$
+
+subject to
+
+$$
+y_i (w^T x_i + b) \geq 1 - \xi_i, \quad \xi_i \geq 0.
+$$
+
+In this formulation, $w$ defines the separating hyperplane, while $\xi_i$ are slack variables that allow some observations to be misclassified. The parameter $C$ controls the trade-off between maximizing the margin and minimizing classification errors.
+
+-   Large values of $C$ place a higher penalty on misclassification, forcing the model to classify training observations more strictly.\
+-   Small values of $C$ allow more violations of the margin, which can lead to smoother decision boundaries.
+
+The second key parameter in the radial kernel is $\gamma$. The radial basis function kernel is defined as
+
+$$
+K(x_i, x_j) = \exp\left(-\gamma \|x_i - x_j\|^2 \right).
+$$
+
+The parameter $\gamma$ determines how quickly the similarity between two observations decreases as their distance increases.
+
+-   Small values of $\gamma$ produce smoother decision boundaries because each observation influences a larger region of the feature space.
+-   Large values of $\gamma$ lead to more complex boundaries, since each observation has a more localized influence.
+
+Since the optimal values of $C$ and $\gamma$ are generally unknown beforehand, a **grid search combined with cross-validation** is used to select them. In this project, we evaluate the following candidate values:
+
+-   $C \in \{5, 10, 12\}$
+-   $\gamma \in \{0.05, 0.1,0.2\}$
+
+This results in a total of:
+
+$$
+3 \times 3 = 9 \text{ hyperparameter combinations}
+$$
+
+Due to the high computational cost of training a radial SVM, especially when combined with grid search and cross-validation, the tuning procedure is performed on a **random subsample of 10,000 observations** from the training set. This allows us to obtain reliable hyperparameter estimates while keeping the computation time manageable.
+
+Each combination of $(C, \gamma)$ is evaluated using **3-fold cross-validation**, where the data is split into three subsets. The model is trained on two subsets and validated on the remaining one, repeating this process three times. The average validation error across the folds is used as the performance measure.
+
+Overall, the total number of models trained during the tuning process is:
+
+$$
+9 \times 3 = 27 \text{ models}
+$$
+
+To ensure reproducibility without requiring the full tuning process to be re-run each time the document is rendered, the saved tuning results are loaded below.
+
+```{r}
+set.seed(123)
+n_sample <- 10000
+idx <- sample(seq_len(nrow(train_up)), n_sample)
+train_small <- train_up[idx, ]
+# 
+#cost_grid  <- c(5, 10, 12)
+#gamma_grid <- c(0.05, 0.1, 0.2)
+# 
+# # 3. tuning
+# system.time({
+#   tuned_svm <- tune.svm(
+#     Diabetes_012 ~ .,
+#     data = train_small,
+#     kernel = "radial",
+#     cost = cost_grid,
+#     gamma = gamma_grid,
+#     scale = TRUE,
+#     tunecontrol = tune.control(cross = 3)
+#   )
+# })
+# 
+# summary(tuned_svm)
+# tuned_svm$best.parameters
+# tuned_svm$best.performance
+#save(tuned_svm, file = "svm_results.RData")
+```
+
+```{r}
+load("svm_results.RData")
+```
+
+```{r}
+best_parameters <- tuned_svm$best.parameters
+best_performance <- tuned_svm$best.performance
+
+best_parameters
+best_performance
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+perf_data <- data.frame(
+  gamma = c(0.05, 0.10, 0.20,
+            0.05, 0.10, 0.20,
+            0.05, 0.10, 0.20),
+  cost = c(5,5,5, 10,10,10, 12,12,12),
+  error = c(0.3609002,0.2857996,0.2319000,
+            0.3327999,0.2648992,0.2291001,
+            0.3249997,0.2633995,0.2282001)
+)
+
+perf_data <- perf_data %>%
+  mutate(setting = paste0("C=", cost, ", \u03b3=", gamma))
+
+top3 <- perf_data %>%
+  slice_min(order_by = error, n = 3)
+
+perf_data <- perf_data %>%
+  mutate(
+    highlight = ifelse(setting %in% top3$setting, "Top 3", "Other")
+  )
+
+ggplot(perf_data, aes(x = reorder(setting, error), y = error, fill = highlight)) +
+  geom_col(alpha = 0.9) +
+  geom_text(aes(label = round(error, 3)), vjust = -0.4, size = 2.2) +
+  scale_fill_manual(values = c("Top 3" = "#D95F0E", "Other" = "grey70")) +
+  labs(
+    title = "Comparison of Hyperparameter Combinations",
+    subtitle = "The three lowest cross-validation errors are highlighted",
+    x = "Hyperparameter Combination",
+    y = "CV Error",
+    fill = ""
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(size = 14),
+    plot.subtitle = element_text(size = 9)
+  )
+
+```
+
+#### Final Hyperparameter Selection
+
+The figure presents the cross-validation error obtained for each combination of the hyperparameters $C$ and $\gamma$ considered in the grid search. It can be observed that the lowest error is achieved for $C = 12$ and $\gamma = 0.2$. However, the difference in performance between this configuration and other nearby values of $C$, particularly $C = 10$ and $C = 5$, is extremely small.
+
+This indicates that the model performance is relatively stable within this region of the hyperparameter space, and that several configurations yield very similar results. Therefore, the apparent advantage of $C = 12$ is likely not practically significant, but rather due to small variations introduced by the cross-validation process.
+
+Given this negligible difference in error, a lower value of $C$ is preferred. In particular, $C = 5$ is selected as the final value, as it provides comparable predictive performance while introducing stronger regularization. This leads to a simpler decision boundary and reduces the risk of overfitting, resulting in a more robust and generalizable model.
+
+Consequently, the final hyperparameter configuration used to train the SVM model is $C = 5$ and $\gamma = 0.2$.
+
+### Final SVM Model and Evaluation
+
+After selecting the optimal hyperparameters through grid search and cross-validation, the final Support Vector Machine (SVM) model is trained using the chosen values of $C = 5$ and $\gamma = 0.2$.
+
+This model represents the best trade-off between predictive performance and model complexity, as it achieves nearly the lowest cross-validation error while maintaining stronger regularization compared to alternative configurations.
+
+Once the model is trained, its performance is evaluated on the test set. The evaluation is carried out using overall accuracy as well as a confusion matrix, allowing for both a global and class-specific analysis of the model’s predictive performance.
+
+```{r}
+# best_model <- svm(Diabetes_012 ~ .,data = train_up ,kernel = "radial",
+#    cost = 5 ,gamma = 0.2,scale = TRUE)
+#save(best_model, file = "svm_bestmodel5.RData")
+```
+
+```{r}
+load("svm_bestmodel5.RData")
+```
+
+```{r}
+pred_svm <- predict(best_model, newdata = test_data)
+```
+
+```{r}
+cm_svm <- confusionMatrix(pred_svm, test_data$Diabetes_012)
+cm_svm
+```
+
+The model achieves an accuracy of 0.6751. However, this value must be interpreted with caution, as the dataset is highly imbalanced. In fact, the No Information Rate (NIR) is 0.8471, indicating that always predicting the majority class ("No Diabetes") would result in a higher accuracy than the current model. The Cohen’s Kappa statistic is 0.2201, suggesting a modest improvement over random classification. This relatively low value reflects the difficulty of the classification task. From the confusion matrix, it can be observed that the model performs reasonably well in identifying the majority class ("No Diabetes"), with a sensitivity of 0.7003 and a high precision (positive predictive value) of 0.9224.
+
+For the "Diabetes" class, the model achieves a sensitivity of 0.5952, indicating that it is able to correctly identify a moderate proportion of positive cases. However, the precision is relatively low (0.2896), meaning that many predicted diabetes cases are actually false positives.
+
+The most challenging class is "Prediabetes", where the sensitivity is extremely low (0.1027). This indicates that the model fails to correctly identify most of the observations belonging to this class. This is likely due to its very low prevalence in the dataset.
+
+```{r}
+metrics <- data.frame(
+  Class = c("No Diabetes", "Prediabetes", "Diabetes"),
+  Sensitivity = c(0.7003, 0.1027, 0.5952),
+  Precision = c(0.9224, 0.0235, 0.2896)
+)
+
+metrics_long <- tidyr::pivot_longer(
+  metrics,
+  cols = -Class,
+  names_to = "Metric",
+  values_to = "Value"
+)
+
+ggplot(metrics_long, aes(x = Class, y = Value, fill = Metric)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = round(Value, 2)),
+            position = position_dodge(width = 0.9),
+            vjust = -0.3,
+            size = 3) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Classification Performance by Class",
+    subtitle = "Sensitivity and Precision for each class",
+    x = "",
+    y = "Value"
+  ) +
+  theme_minimal()
+```
+
+::: callout-warning
+## Model Limitations
+
+It is important to note that the SVM model may not be the most suitable approach for this problem.
+
+The results show that the model struggles to correctly classify minority classes. In addition, the computational cost of training a radial SVM is high, which limits its scalability for large datasets.
+:::
+
+::: callout-important
+**Final Conclusion and Model Assessment: SVM**
+
+The final SVM model with RBF kernel ($C = 5$, $\gamma = 0.2$), trained on the upsampled training set and evaluated on the original test set, achieves an overall accuracy of 0.6751 and a Cohen's Kappa of 0.2201. Both figures must be interpreted cautiously: the accuracy falls well below the No Information Rate of 0.8471, and the Kappa reflects only modest agreement beyond chance, highlighting the difficulty of this imbalanced three-class problem. Compared to the k-NN model (Kappa $\approx$ -0.007), the SVM represents a clear improvement, though the task remains fundamentally hard.
+
+At the class level, the model performs best on **No Diabetes**, with a sensitivity of 0.7003 and a high precision of 0.9224, meaning that when it predicts this class it is generally correct. For **Diabetes**, it achieves a moderate sensitivity of 0.5952, but precision drops to 0.2896, indicating a high rate of false positives. The most critical limitation is the detection of **Prediabetes**: sensitivity is only 0.1027 and precision is as low as 0.0235, meaning the model correctly identifies barely 1 in 10 prediabetic cases and the vast majority of its Prediabetes predictions are wrong. This failure is consistent with the pattern observed across all methods in this report and is primarily explained by the very low prevalence of this class in the data.
+
+The choice of $C = 5$ over the strictly lowest-error configuration ($C = 12$, $\gamma = 0.2$) was deliberate: given the negligible difference in cross-validation error across the top configurations, the stronger regularization of a lower $C$ was preferred to reduce the risk of overfitting and obtain a simpler, more generalizable decision boundary. It should also be noted that the grid search was performed on a subsample of 10,000 observations due to the high computational cost of the radial SVM, which necessarily limits the exhaustiveness of the tuning procedure.
+:::
+
+## 3.4. Neural Networks
+
+In this section, we apply a **Multilayer Perceptron (MLP)** neural network to predict the `Diabetes_012` target variable (with possible values `No Diabetes, Prediabetes`, `Diabetes`). Since our problem is a three-class classification task, we build a fully-connected feedforward network: an architecture where every neuron in each layer is connected to all neurons in the next layer, and information flows in one direction from input to output with no cycles. The network takes our 21 features as input, passes them through two hidden layers with non-linear activation, and produces three output scores (one per class) from which the predicted label is derived. We use Python's `PyTorch` library to build, train, and evaluate the model since it is the standard choice when training Neural networks. The datasets `train_up` and `test_data` are loaded directly from the CSV files saved previously.
+
+```{python}
+# Import necessary libraries for Neural Networks
+import random
+import time
+import numpy as np
+import pandas as pd
+import torch
+from torch import nn
+from torch.utils.data import DataLoader, random_split, Subset, TensorDataset
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split 
+from torchvision import datasets, transforms
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix, classification_report
+#Ensure reproducibility
+seed = 123
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+
+#Device selection (CPU or GPU if available
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+```
+
+### Data Preparation
+
+The first step is to load both `train_up` (upsampled, class-balanced) and `test_data` (testing set) directly from the previously exported CSV files. Notice that the target variable `Diabetes_012` is a multiclass variable where the classes are stored as text labels (`"No Diabetes"`, `"Prediabetes"` and `"Diabetes"`). Since PyTorch functions such as `CrossEntropyLoss` require integer targets, we map these labels to numeric codes: 0 for No Diabetes, 1 for Prediabetes, and 2 for Diabetes. Once the labels are encoded, we separate the features from the target variable in both sets, obtaining the feature matrices `X_train` and `X_test` and the label vectors `y_train` and `y_test`.
+
+```{python}
+# Load CSVs with train and test data using pandas
+train_df = pd.read_csv("train_up.csv")
+test_df  = pd.read_csv("test_data.csv")
+
+# Transfrom text labels to integer codes 
+# "No Diabetes": 0, "Prediabetes": 1, "Diabetes": 2
+class_names  = ["No Diabetes", "Prediabetes", "Diabetes"]
+label_to_int = {name: i for i, name in enumerate(class_names)}
+
+target_col = "Diabetes_012"
+
+#Split features and target 
+X_train = train_df.drop(columns=[target_col]).values.astype(np.float32)
+y_train = train_df[target_col].map(label_to_int).values.astype(np.int64)
+
+X_test  = test_df.drop(columns=[target_col]).values.astype(np.float32)
+y_test  = test_df[target_col].map(label_to_int).values.astype(np.int64)
+
+print(f"Training features shape : {X_train.shape}")
+print(f"Training labels shape   : {y_train.shape}")
+print(f"Test features shape     : {X_test.shape}")
+print(f"Test labels shape       : {y_test.shape}")
+print(f"\nClass distribution in train_up (after upsampling):")
+unique, counts = np.unique(y_train, return_counts=True)
+for u, c in zip(unique, counts):
+    print(f"  Class {u} ({class_names[u]}): {c} samples")
+```
+
+### Necessary Helper Functions for Neural Networks
+
+Before building and training the network, we define a set of functions that will be used throughout the training process.
+
+We start with the `TabularNN` class, which specifies the structure of the neural network that will be trained to classify each observation into one of the three diabetes categories. It builds on`nn.Module` (`PyTorch`'s base class for all neural network models). The network receives the 21 input variables and processes them through two fully connected hidden layers with ReLU activations, which allow it to learn non-linear patterns in the data. A dropout layer is applied after the first hidden layer to reduce overfitting. The final layer produces three raw output scores, called logits, one for each class. These are not probabilities yet, since the loss function handles that conversion internally.
+
+```{python}
+# ----------- PyTorch's base class for Neural networks -----------
+class TabularNN(nn.Module):
+    def __init__(self, input_dim, num_classes, hidden1=64, hidden2=32, dropout=0.2):
+        """MLP for tabular multiclass classification.
+
+        Args:
+            input_dim  : number of input features (21 for our dataset).
+            num_classes: number of target classes (3: No Diabetes, Prediabetes, Diabetes).
+            hidden1    : width of the first hidden layer.
+            hidden2    : width of the second hidden layer.
+            dropout    : dropout probability applied after the first hidden layer.
+        """
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden1),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden1, hidden2),
+            nn.ReLU(),
+            # logits; CrossEntropyLoss applies softmax internally
+            nn.Linear(hidden2, num_classes),  
+        )
+
+    def forward(self, x):
+        return self.net(x)
+```
+
+Next, we define the helper functions used to train and evaluate the neural network. The `train_one_epoch` function performs one full iteration over the training set, known as one epoch. For each mini-batch, it computes the model predictions, evaluates the cross-entropy loss (the standard loss for multiclass classification), performs backpropagation to calculate the gradients, and updates the model weights using the Adam optimizer.
+
+In addition, the `evaluate` function is used to assess the model on a validation set without changing its parameters. To do this, it switches the model to evaluation mode, which disables dropout, and uses `torch.no_grad()` to avoid gradient computation. It then returns the average loss and accuracy over the dataset.
+
+Then, the `fit_model` function runs the full training process across all epochs. At each epoch, it calls `train_one_epoch` on the training set and `evaluate` on the validation set, storing the corresponding loss and accuracy values in a history dictionary for later analysis. Once training is complete, `predict_all` generates the model’s predicted classes for a complete dataset and stores them together with the true labels in NumPy arrays. This is useful for computing final evaluation metrics such as the confusion matrix or classification report.
+
+```{python}
+#-----------Training / evaluation helpers -----------
+# Run one full pass over the training data, updating the model weights
+# via backpropagation after each mini-batch.
+def train_one_epoch(model, loader, criterion, optimizer, device): 
+    """Train for one epoch, updating model weights using backpropagation after each mini-batch. 
+    Args: 
+        model: nn.Module to optimize. 
+        loader: DataLoader with mini-batches (x, y). 
+        criterion: loss function (e.g., CrossEntropyLoss). 
+        optimizer: update rule (e.g., Adam). 
+        device: torch device ('cpu' or 'cuda').
+    Returns:
+    (avg_loss, accuracy) over the epoch.
+    """
+    model.train()   #training mode enables dropout behavior
+    total_loss, correct, total = 0.0, 0, 0
+
+    for x, y in loader:
+        x, y = x.to(device), y.to(device)
+        optimizer.zero_grad()          # clear gradients from previous step before backprop
+        logits = model(x)              # forward pass -> raw class scores(logits)
+        loss   = criterion(logits, y)  # cross-entropy loss: compare predictions vs true labels
+        loss.backward()                # backprop: compute gradients d(loss)/d(param)
+        optimizer.step()               # update parameters using computed gradient-descent
+
+        total_loss += loss.item() * x.size(0)
+        preds       = logits.argmax(dim=1)   # predicted class = index of highest logit
+        correct    += (preds == y).sum().item()
+        total      += y.size(0)
+
+    return total_loss / total, correct / total
+
+# Evaluate the model on a data split without updating any weights,
+# used to monitor performance on the validation or test set.
+def evaluate(model, loader, criterion, device): 
+    """Evaluate on validation or test data (no gradient tracking). 
+    Uses model.eval() + torch.no_grad() for deterministic, memory-efficient inference.
+    Returns (avg_loss, accuracy). Returns: (avg_loss, accuracy). 
+    """ 
+    model.eval() # disables dropout for deterministic inference 
+    total_loss, correct, total = 0.0, 0, 0
+ 
+    with torch.no_grad():
+        for x, y in loader:
+            x, y   = x.to(device), y.to(device)
+            logits = model(x)
+            loss   = criterion(logits, y)
+
+            total_loss += loss.item() * x.size(0)
+            preds       = logits.argmax(dim=1)
+            correct    += (preds == y).sum().item()
+            total      += y.size(0)
+
+    return total_loss / total, correct / total
+
+# Run the full training loop across all epochs, recording loss and
+# accuracy for both the training and validation sets at each step
+def fit_model(model, train_loader, val_loader, criterion, optimizer, epochs, device): 
+    """Full training loop; stores per-epoch metrics in `history` for plotting."""
+
+    history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
+
+    for epoch in range(1, epochs + 1):
+        t0 = time.time()
+        train_loss, train_acc = train_one_epoch(model, train_loader,
+                                                criterion, optimizer, device)
+        val_loss,   val_acc   = evaluate(model, val_loader, criterion, device)
+
+        history["train_loss"].append(train_loss)
+        history["train_acc"].append(train_acc)
+        history["val_loss"].append(val_loss)
+        history["val_acc"].append(val_acc)
+
+        dt = time.time() - t0
+        print(
+            f"Epoch {epoch:02d}/{epochs} | "
+            f"train_loss={train_loss:.4f}, train_acc={train_acc:.4f} | "
+            f"val_loss={val_loss:.4f}, val_acc={val_acc:.4f} | {dt:.1f}s"
+        )
+
+    return history
+
+# Store predictions and true labels across a dataset into NumPy arrays
+def predict_all(model, loader, device):
+    """Return NumPy arrays (y_true, y_pred) for sklearn metrics/reporting."""
+    model.eval()
+    y_true, y_pred = [], []
+    with torch.no_grad():
+        for x, y in loader:
+            logits = model(x.to(device))
+            preds = logits.argmax(dim=1).cpu()
+            y_pred.extend(preds.numpy().tolist())
+            y_true.extend(y.numpy().tolist())
+    return np.array(y_true), np.array(y_pred)
+```
+
+Lastly, the two plotting functions provide visual diagnostics: `plot_learning_curves` displays the evolution of loss and accuracy on both the training and validation sets for each epoch and `plot_confusion_with_offdiag_highlight` displays the confusion matrix. In addition, although the raw-count confusion matrix is useful for showing the absolute number of correct and incorrect predictions, a normalized version makes the recall of each class directly comparable regardless of class size. This is implemented in `plot_confusion_normalized`.
+
+```{python}
+#-----------Plotting helpers -----------
+# Plots of loss and accuracy curves for the training and validation sets 
+def plot_learning_curves(history, title_prefix="Model"):
+    """Plot loss and accuracy curves from `history` dictionary."""
+    epochs = range(1, len(history["train_loss"]) + 1)
+
+    plt.figure(figsize=(12, 4))
+
+    plt.subplot(1, 2, 1)
+    plt.plot(epochs, history["train_loss"], marker="o", label="Train")
+    plt.plot(epochs, history["val_loss"], marker="o", label="Validation")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title(f"{title_prefix} loss curves")
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(epochs, history["train_acc"], marker="o", label="Train")
+    plt.plot(epochs, history["val_acc"], marker="o", label="Validation")
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy")
+    plt.title(f"{title_prefix} accuracy curves")
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+# Plot of the confusion matrix 
+def plot_confusion_with_offdiag_highlight(y_true, y_pred, title, target_names=None):
+    """Confusion matrix: blue diagonal (correct), red off-diagonal (errors)."""
+    cm = confusion_matrix(y_true, y_pred).astype(float)
+    n  = cm.shape[0]
+
+    diag_mask     = np.eye(n, dtype=bool)
+    off_diag_mask = ~diag_mask
+    diag_vals     = np.where(diag_mask,     cm, np.nan)
+    off_diag_vals = np.where(off_diag_mask, cm, np.nan)
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    off_max = np.nanmax(off_diag_vals) if np.any(off_diag_mask) else 0.0
+    if np.isfinite(off_max) and off_max > 0:
+        sns.heatmap(
+            off_diag_vals, mask=np.isnan(off_diag_vals),
+            cmap=sns.light_palette("#d62728", as_cmap=True),
+            vmin=0, vmax=off_max, cbar=False, ax=ax,
+            linewidths=0.3, linecolor="white",
+        )
+
+    diag_max = np.nanmax(diag_vals) if np.any(diag_mask) else 0.0
+    if np.isfinite(diag_max) and diag_max > 0:
+        sns.heatmap(
+            diag_vals, mask=np.isnan(diag_vals),
+            cmap=sns.light_palette("#1f77b4", as_cmap=True),
+            vmin=0, vmax=diag_max, cbar=False, ax=ax,
+            linewidths=0.3, linecolor="white",
+        )
+
+    for i in range(n):
+        for j in range(n):
+            ax.text(j + 0.5, i + 0.5, f"{int(cm[i, j])}",
+                    ha="center", va="center", color="black", fontsize=9)
+
+    tick_labels = target_names if target_names is not None else list(range(n))
+    ax.set_title(title)
+    ax.set_xlabel("Predicted label"); ax.set_ylabel("True label")
+    ax.set_xticks(np.arange(n) + 0.5); ax.set_xticklabels(tick_labels, rotation=30, ha="right")
+    ax.set_yticks(np.arange(n) + 0.5); ax.set_yticklabels(tick_labels, rotation=0)
+    ax.text(0.0, -0.18,
+            "Blue scale: diagonal (correct) | Red scale: off-diagonal (errors)",
+            transform=ax.transAxes, fontsize=9, color="dimgray")
+
+    plt.tight_layout()
+    plt.show()
+```
+
+```{python}
+# Plot confusion matrix normalized
+def plot_confusion_normalized(y_true, y_pred, title, target_names=None):
+    """Confusion matrix: blue diagonal, red off-diagonal, colours 
+    scaled by row-normalised recall."""
+    cm      = confusion_matrix(y_true, y_pred).astype(float)
+    cm_norm = cm / cm.sum(axis=1, keepdims=True)
+    n       = cm.shape[0]
+
+    diag_mask     = np.eye(n, dtype=bool)
+    off_diag_mask = ~diag_mask
+    diag_vals     = np.where(diag_mask,     cm_norm, np.nan)
+    off_diag_vals = np.where(off_diag_mask, cm_norm, np.nan)
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    off_max = np.nanmax(off_diag_vals) if np.any(off_diag_mask) else 0.0
+    if np.isfinite(off_max) and off_max > 0:
+        sns.heatmap(
+            off_diag_vals, mask=np.isnan(off_diag_vals),
+            cmap=sns.light_palette("#d62728", as_cmap=True),
+            vmin=0, vmax=off_max, cbar=False, ax=ax,
+            linewidths=0.3, linecolor="white",
+        )
+
+    diag_max = np.nanmax(diag_vals) if np.any(diag_mask) else 0.0
+    if np.isfinite(diag_max) and diag_max > 0:
+        sns.heatmap(
+            diag_vals, mask=np.isnan(diag_vals),
+            cmap=sns.light_palette("#1f77b4", as_cmap=True),
+            vmin=0, vmax=diag_max, cbar=False, ax=ax,
+            linewidths=0.3, linecolor="white",
+        )
+
+    for i in range(n):
+        for j in range(n):
+            ax.text(j + 0.5, i + 0.5,
+                    f"{cm_norm[i,j]:.2f}\n({int(cm[i,j])})",
+                    ha="center", va="center", color="black", fontsize=9)
+
+    tick_labels = target_names if target_names is not None else list(range(n))
+    ax.set_title(title)
+    ax.set_xlabel("Predicted label"); ax.set_ylabel("True label")
+    ax.set_xticks(np.arange(n) + 0.5); ax.set_xticklabels(tick_labels, rotation=30, ha="right")
+    ax.set_yticks(np.arange(n) + 0.5); ax.set_yticklabels(tick_labels, rotation=0)
+    ax.text(0.0, -0.18,
+    "Blue scale: diagonal (correct) | Red scale: off-diagonal (errors) | values: recall (raw count)",
+            transform=ax.transAxes, fontsize=9, color="dimgray")
+
+    plt.tight_layout()
+    plt.show()
+```
+
+### DataLoader Construction
+
+Because `train_up` and `test_data` are already split externally, we only need to extract a validation set (15%) from `train_up` using a stratified split to preserve class proportions. All features are then normalized using `StandardScaler`, which rescales each variable to zero mean and unit variance (essential for neural networks, as variables with larger numeric ranges would otherwise dominate the learning process). The scaler is fitted exclusively on the training data and then applied to all three splits to avoid data leakage. Finally, features and labels are wrapped into `TensorDataset` objects and fed into `DataLoader`, with shuffling enabled only for training to ensure randomness during weight updates.
+
+```{python}
+# Build loaders from the pre-split CSV data 
+def build_loaders_from_split(X_train, y_train, X_test, y_test,
+                              batch_size=256, val_size=0.15, seed=seed):
+    """Create train/val/test DataLoaders from train and test arrays.
+    Args:
+        X_train, y_train : full training features and integer labels.
+        X_test,  y_test  : held-out test features and integer labels.
+        batch_size       : mini-batch size for the DataLoaders.
+        val_size         : fraction of X_train reserved for validation.
+        seed             : reproducibility seed for the stratified split.
+
+    Returns:
+        train_loader, val_loader, test_loader, scaler
+    """
+    # Stratified split to keep class proportions in both folds
+    X_tr, X_val, y_tr, y_val = train_test_split( X_train, y_train, test_size=val_size,
+                                                 stratify=y_train, random_state=seed)
+
+    # Fit scaler on training data only; apply to val and test
+    scaler  = StandardScaler()
+    X_tr    = scaler.fit_transform(X_tr)
+    X_val   = scaler.transform(X_val)
+    X_test  = scaler.transform(X_test)
+
+    def make_ds(X, y):
+        return TensorDataset(
+            torch.tensor(X, dtype=torch.float32),
+            torch.tensor(y, dtype=torch.long),
+        )
+
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    train_loader = DataLoader(make_ds(X_tr,   y_tr),  batch_size=batch_size, 
+                              shuffle=True,  generator=generator)
+    val_loader   = DataLoader(make_ds(X_val,  y_val), batch_size=batch_size, shuffle=False)
+    test_loader  = DataLoader(make_ds(X_test, y_test),batch_size=batch_size, shuffle=False)
+
+    print(f"Train batches: {len(train_loader)} ({len(y_tr)} samples)")
+    print(f"Val   batches: {len(val_loader)}   ({len(y_val)} samples)")
+    print(f"Test  batches: {len(test_loader)}  ({len(y_test)} samples)")
+
+    return train_loader, val_loader, test_loader, scaler
+```
+
+### Baseline Model
+
+Before tuning the hyperparameters, we train an initial baseline model to establish a reference level of performance. Using `build_loaders_from_split`, we first create the training, validation, and test loaders, setting the batch size and reserving part of the training data for validation. We then initialize the `TabularNN` model with two hidden layers, a dropout rate of 0.2, `CrossEntropyLoss` as the loss function, and `Adam` as the optimizer with a learning rate of 1e-3. The model is trained for 30 epochs. This baseline gives us a reference point to assess whether the hyperparameter tuning actually improves performance.
+
+```{python}
+#| output: false
+
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+# Baseline hyperparameter configuration 
+baseline_cfg = {
+    "hidden1"   : 64,
+    "hidden2"   : 32,
+    "dropout"   : 0.2,
+    "lr"        : 1e-3,
+    "epochs"    : 30,
+    "batch_size": 256 }
+
+# Build DataLoaders for training, validation, and test sets
+train_loader, val_loader, test_loader, scaler = build_loaders_from_split(
+    X_train, y_train, X_test, y_test,
+    batch_size=256, val_size=0.15, seed=seed)
+
+# Create the baseline neural network with the chosen architecture
+baseline_model = TabularNN(
+    input_dim   = X_train.shape[1],   # 21 features
+    num_classes = len(class_names),   # 3 classes
+    hidden1     = baseline_cfg["hidden1"],
+    hidden2     = baseline_cfg["hidden2"],
+    dropout     = baseline_cfg["dropout"],
+).to(device)
+
+print(baseline_model)
+
+# Define the loss function and optimizer
+criterion = nn.CrossEntropyLoss()   # multiclass log-loss
+optimizer = torch.optim.Adam(baseline_model.parameters(), lr=baseline_cfg["lr"])
+
+# Train the baseline model and store training history
+baseline_history = fit_model(
+    baseline_model,
+    train_loader,
+    val_loader,
+    criterion,
+    optimizer,
+    epochs=baseline_cfg["epochs"],
+    device=device,
+)
+```
+
+#### Baseline learning curves
+
+The learning curves show that the model is learning correctly over the 30 epochs, with both loss and accuracy improving steadily. We clearly observe that the validation loss (left plot in orange) is consistently lower than the training loss (left plot in blue), and the validation accuracy (right plot in orange) is consistently higher than the training accuracy (right plot in blue) throughout the entire training process. This is the expected output since during training, dropout randomly deactivates neurons making the training pass harder, while during validation dropout is disabled and the full network is used, naturally leading to better validation performance. Both curves are still slowly improving at epoch 30 without showing signs of stabilizing, suggesting the model could have a better performance with additional training epochs. Overall, the baseline reaches a validation accuracy of approximately 77%, which we will use as the reference point to assess whether hyperparameter tuning leads to any improvement.
+
+```{python}
+plot_learning_curves(baseline_history, title_prefix="Baseline MLP (Diabetes)")
+```
+
+#### Baseline Test Evaluation
+
+We now evaluate the baseline model on the held-out test set. In addition to test loss and accuracy, we generate the confusion matrix and the classification report to better understand the model’s overall performance and the types of classification errors it makes across the three classes.
+
+```{python}
+# Loss and accuracy on the held-out test set
+test_loss, test_acc = evaluate(baseline_model, test_loader, criterion, device)
+print(f"Baseline test loss    : {test_loss:.4f}")
+print(f"Baseline test accuracy: {test_acc:.4f}")
+
+# Full predictions for the confusion matrix and per-class report
+y_true_base, y_pred_base = predict_all(baseline_model, test_loader, device)
+
+plot_confusion_with_offdiag_highlight(
+    y_true_base,
+    y_pred_base,
+    title="Confusion Matrix – Baseline MLP",
+    target_names=class_names,
+)
+
+plot_confusion_normalized(
+    y_true_base,
+    y_pred_base,
+    title="Confusion Matrix Normalized – Baseline MLP",
+    target_names=class_names,
+)
+print(classification_report(y_true_base, y_pred_base, target_names=class_names, digits=4))
+
+```
+
+The baseline MLP achieves a test accuracy of 0.6179 and a test loss of 0.8207. However, since the test set is imbalanced, the class-specific metrics and the normalized confusion matrix provide a more informative picture of performance.
+
+The normalized confusion matrix shows that the network correctly identifies about 63% of both No Diabetes and Diabetes cases, but only around 21% of Prediabetes cases. In absolute terms, this corresponds to 5261 correctly classified non-diabetic patients, 879 correctly classified diabetic patients, and only 39 correctly classified prediabetic patients. Most prediabetic cases are instead assigned to Diabetes (102 cases, 54%) or No Diabetes (47 cases, 25%), which confirms that the model struggles to learn the profile of this intermediate class.
+
+This pattern is also reflected in the classification report. The Prediabetes class has an F1-score of only 0.0423, confirming that the model does not capture this class reliably. In contrast, No Diabetes shows very high precision (0.9495), meaning that predictions for this class are usually correct. For Diabetes, recall is moderate (0.6274), but precision remains low (0.3138), which indicates that many patients predicted as diabetic are actually false positives.
+
+From a clinical perspective, these errors do not have the same importance. Classifying a non-diabetic person as diabetic is undesirable, but it is usually less serious because it may lead to further tests or monitoring. More concerning are the false negatives: predicting No Diabetes for a truly Diabetic patient, or, with somewhat less severity, for a Prediabetic patient, since these cases may delay treatment or preventive intervention. In this baseline model, 233 diabetic cases (17%) and 47 (25%) prediabetic cases are classified as No Diabetes, which are the most relevant mistakes from a healthcare point of view.
+
+Overall, the model seems to separate the extreme classes better than the intermediate one. Therefore, although the global accuracy is moderate, the macro F1-score (0.4136) shows that performance across classes is much less balanced. This means the baseline model is useful as a first reference, but it is not yet reliable enough if the goal is to detect all three classes well.
+
+### Hyperparameter Tuning
+
+We run a small grid search over hidden layer sizes, dropout rate, learning rate, and batch size, training each configuration for a reduced number of epochs (`epochs = 10`) to keep runtime reasonable. The grid is designed to explore three axes of variation: network capacity (wider vs. narrower hidden layers), regularisation strength (low, medium, and high dropout), and optimisation speed (learning rates spanning one order of magnitude). Batch size is also included because larger batches produce noisier gradient estimates that can sometimes help escape local minima in shallow networks. After ranking all configurations by their best validation accuracy, the best configuration is then trained again from scratch on the full training split for a final fair comparison.
+
+```{python}
+#| output: false
+# Tuning helper function
+def run_experiment(cfg, X_train, y_train, X_test, y_test, tune_epochs=10, seed=seed):
+    """Train one configuration from the tuning grid.
+
+    Args:
+        cfg        : dict with hidden1, hidden2, dropout, lr, batch_size.
+        tune_epochs: short run for fast comparison (not the final epoch count).
+
+    Returns:
+        dict with config, best validation accuracy, and training history.
+    """
+    tl, vl, _, _ = build_loaders_from_split(
+        X_train, y_train, X_test, y_test,
+        batch_size=cfg["batch_size"], val_size=0.15, seed=seed,
+    )
+
+    model = TabularNN(
+        input_dim   = X_train.shape[1],
+        num_classes = len(class_names),
+        hidden1     = cfg["hidden1"],
+        hidden2     = cfg["hidden2"],
+        dropout     = cfg["dropout"],
+    ).to(device)
+
+    crit = nn.CrossEntropyLoss()                               # same objective for fair comparison
+    opt  = torch.optim.Adam(model.parameters(), lr=cfg["lr"]) # each config can use a different lr
+
+    hist         = fit_model(model, tl, vl, crit, opt, epochs=tune_epochs, device=device)
+    best_val_acc = max(hist["val_acc"])
+
+    return {"config": cfg, "best_val_acc": best_val_acc, "history": hist}
+
+# Grid search loops through candidate hyperparameters and ranks them by best validation accuracy.
+grid = [
+    # -- narrow network, moderate regularisation --
+    {"hidden1":  64, "hidden2": 32, "dropout": 0.2, "lr": 1e-3, "batch_size": 256},
+    {"hidden1":  64, "hidden2": 32, "dropout": 0.3, "lr": 3e-4, "batch_size": 256},
+    # -- medium network, low regularisation --
+    {"hidden1": 128, "hidden2": 64, "dropout": 0.1, "lr": 1e-3, "batch_size": 256},
+    {"hidden1": 128, "hidden2": 64, "dropout": 0.2, "lr": 1e-3, "batch_size": 256},
+    # -- medium network, stronger regularisation --
+    {"hidden1": 128, "hidden2": 64, "dropout": 0.3, "lr": 3e-4, "batch_size": 256},
+    {"hidden1": 128, "hidden2": 64, "dropout": 0.4, "lr": 3e-4, "batch_size": 256},
+    # -- larger batch (noisier gradient, sometimes helps) --
+    {"hidden1": 128, "hidden2": 64, "dropout": 0.2, "lr": 1e-3, "batch_size": 512},
+    {"hidden1": 128, "hidden2": 64, "dropout": 0.3, "lr": 5e-4, "batch_size": 512},
+]
+
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+results = []
+for i, cfg in enumerate(grid, start=1):
+    print("=" * 70)
+    print(f"Tuning run {i}/{len(grid)} | cfg={cfg}")
+    results.append(run_experiment(cfg, X_train, y_train, X_test, y_test, tune_epochs=10))
+
+results  = sorted(results, key=lambda r: r["best_val_acc"], reverse=True)
+best_cfg = results[0]["config"]
+```
+
+```{python}
+print("\nRanked tuning results:")
+for rank, r in enumerate(results, start=1):
+    c = r["config"]
+    print(
+        f"{rank:2d}. val_acc={r['best_val_acc']:.4f} | "
+        f"hidden=({c['hidden1']},{c['hidden2']}), "
+        f"dropout={c['dropout']}, lr={c['lr']}, batch={c['batch_size']}"
+    )
+
+print(f"\nBest config selected: {best_cfg}")
+```
+
+To make the grid search results easier to read, we plot the best validation accuracy for every configuration, sorted from best to worst. This gives a visual comparison of all candidate hyperparameter combinations.
+
+```{python}
+def plot_tuning_results(results):
+    """Bar chart of best validation accuracy for every grid config."""
+    labels = [
+        f"h=({r['config']['hidden1']},{r['config']['hidden2']})\n"
+        f"d={r['config']['dropout']}, lr={r['config']['lr']}\n"
+        f"bs={r['config']['batch_size']}"
+        for r in results
+    ]
+    accs = [r["best_val_acc"] for r in results]
+
+    colours = ["#1f77b4" if i == 0 else "#aec7e8" for i in range(len(results))]
+
+    fig, ax = plt.subplots(figsize=(max(8, len(results) * 1.4), 4))
+    bars = ax.bar(range(len(results)), accs, color=colours, edgecolor="white", linewidth=0.6)
+    ax.set_xticks(range(len(results)))
+    ax.set_xticklabels(labels, fontsize=7.5)
+    ax.set_ylabel("Best validation accuracy")
+    ax.set_title("Grid-search results – ranked by validation accuracy")
+    ax.set_ylim(min(accs) - 0.02, max(accs) + 0.02)
+    ax.axhline(accs[0], color="#1f77b4", linestyle="--", linewidth=0.8, alpha=0.6)
+
+    for bar, acc in zip(bars, accs):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.001,
+                f"{acc:.4f}", ha="center", va="bottom", fontsize=7)
+
+    plt.tight_layout()
+    plt.show()
+
+plot_tuning_results(results)
+```
+
+The grid search shows a clear best configuration, achieving a validation accuracy of 0.7902, noticeably above the rest. Therefore, the final model will use 128 neurons in the first hidden layer, 64 in the second, dropout = 0.1, learning rate = 0.001, and batch size = 256.
+
+### Best model – Full training
+
+We retrain the winning configuration from scratch on the full training set for 50 epochs (more than the 30 of the baseline to see if we can improve it further) and compare its test performance with the baseline using both global metrics and per-class breakdowns.
+
+```{python}
+#| output: false
+# Re-create loaders with best batch size 
+train_loader_best, val_loader_best, test_loader_best, scaler_best = build_loaders_from_split(
+    X_train, y_train, X_test, y_test,
+    batch_size=best_cfg["batch_size"], val_size=0.15, seed=seed,
+)
+
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+
+best_model = TabularNN(
+    input_dim   = X_train.shape[1],
+    num_classes = len(class_names),
+    hidden1     = best_cfg["hidden1"],
+    hidden2     = best_cfg["hidden2"],
+    dropout     = best_cfg["dropout"],
+).to(device)
+
+criterion_best = nn.CrossEntropyLoss()
+optimizer_best = torch.optim.Adam(best_model.parameters(), lr=best_cfg["lr"])
+
+best_history = fit_model(
+    best_model,
+    train_loader_best,
+    val_loader_best,
+    criterion_best,
+    optimizer_best,
+    epochs=50,
+    device=device,
+)
+```
+
+#### Best model learning curves
+
+The learning curves show that the model improves steadily throughout training. Both training and validation loss decrease consistently, while accuracy increases and gradually stabilizes. Validation accuracy reaches around 0.84, and validation loss remains slightly below training loss, which is consistent with the use of dropout during training. Overall, the curves suggest that the model learns effectively and generalizes well, without clear signs of strong overfitting by the end of the 50 epochs.
+
+```{python}
+plot_learning_curves(best_history, title_prefix="Tuned MLP (Diabetes)")
+```
+
+#### Best model test evaluation
+
+As before, we evaluate the best model on the held-out test set by reporting the test loss and accuracy, together with the confusion matrix and classification report.
+
+```{python}
+# Test evaluation 
+best_test_loss, best_test_acc = evaluate(best_model, test_loader_best, criterion_best, device)
+print(f"Best-config test loss    : {best_test_loss:.4f}")
+print(f"Best-config test accuracy: {best_test_acc:.4f}")
+print(f"Baseline    test accuracy: {test_acc:.4f}")
+
+y_true_best, y_pred_best = predict_all(best_model, test_loader_best, device)
+
+plot_confusion_with_offdiag_highlight(
+    y_true_best,
+    y_pred_best,
+    title="Confusion Matrix – Tuned MLP",
+    target_names=class_names,
+)
+
+plot_confusion_normalized(
+    y_true_best, y_pred_best,
+    title="Normalized Confusion Matrix – Tuned MLP",
+    target_names=class_names,
+)
+
+print(classification_report(y_true_best, y_pred_best, target_names=class_names, digits=4))
+```
+
+The tuned MLP achieves a test accuracy of 0.6798 and a test loss of 0.7835. Its best results are again in the two extreme classes: No Diabetes and Diabetes. From the normalized confusion matrix, the model correctly identifies about 69% of both No Diabetes and Diabetes cases, which is consistent with their recalls (0.6915 and 0.6902). In contrast, performance on Prediabetes remains very weak: the model correctly detects only about 8% of these cases (15 out of 188), and most of them are classified as Diabetes (58%) or No Diabetes (34%).
+
+The classification report confirms this pattern. No Diabetes has very high precision (0.9364), meaning that this prediction is usually reliable, while Diabetes reaches a moderate recall (0.6902) but low precision (0.2983), so many predicted diabetic cases are false positives. The weakest class is again Prediabetes, with extremely low precision (0.0274) and F1-score (0.0408), which shows that the model is still unable to separate this intermediate group well.
+
+From a practical point of view, the most concerning errors are the false negatives: 331 diabetic patients and 64 prediabetic patients are classified as No Diabetes, which may delay treatment or preventive action. Overall, the tuned model improves the global results, but it still struggles to identify Prediabetes and continues to make clinically important mistakes.
+
+### Comparison between baseline model and best model
+
+To compare both models more clearly, we place the two normalized confusion matrices side by side and examine their class-wise performance, complemented by a grouped bar chart of the per-class F1-scores.
+
+```{python}
+def plot_side_by_side_confusion(y_true_a, y_pred_a, title_a,
+                                 y_true_b, y_pred_b, title_b,
+                                 target_names=None):
+    """Two row-normalised confusion matrices in one figure for easy comparison."""
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    for ax, y_true, y_pred, title in [
+        (axes[0], y_true_a, y_pred_a, title_a),
+        (axes[1], y_true_b, y_pred_b, title_b),
+    ]:
+        cm      = confusion_matrix(y_true, y_pred).astype(float)
+        cm_norm = cm / cm.sum(axis=1, keepdims=True)
+        n       = cm.shape[0]
+
+        sns.heatmap(cm_norm, annot=False, cmap="Blues",
+                    vmin=0, vmax=1, linewidths=0.4, linecolor="white", ax=ax)
+
+        for i in range(n):
+            for j in range(n):
+                colour = "white" if cm_norm[i, j] > 0.6 else "black"
+                ax.text(j + 0.5, i + 0.5,
+                        f"{cm_norm[i,j]:.2f}",
+                        ha="center", va="center", fontsize=10, color=colour)
+
+        labels = target_names if target_names is not None else list(range(n))
+        ax.set_title(title, fontsize=11)
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("True")
+        ax.set_xticks(np.arange(n) + 0.5); ax.set_xticklabels(labels, rotation=30, ha="right")
+        ax.set_yticks(np.arange(n) + 0.5); ax.set_yticklabels(labels, rotation=0)
+
+    plt.suptitle("Row-normalised confusion matrices (recall per cell)", fontsize=12, y=1.01)
+    plt.tight_layout()
+    plt.show()
+
+plot_side_by_side_confusion(
+    y_true_base, y_pred_base, "Baseline MLP",
+    y_true_best, y_pred_best, "Tuned MLP",
+    target_names=class_names,
+)
+```
+
+The side-by-side normalized confusion matrices show that the tuned MLP improves recall for No Diabetes and Diabetes, increasing both from about 0.63 to 0.69. However, performance on Prediabetes becomes even weaker, with recall dropping from 0.21 to 0.08. This suggests that the tuned model separates the two extreme classes better, but at the cost of identifying the intermediate class even less effectively.
+
+```{python}
+from sklearn.metrics import classification_report
+import re
+
+def extract_f1_per_class(y_true, y_pred, class_names):
+    """Return a dict {class_name: f1_score} from sklearn's report."""
+    report = classification_report(y_true, y_pred, target_names=class_names,
+                                   output_dict=True, digits=4)
+    return {name: report[name]["f1-score"] for name in class_names}
+
+def plot_f1_comparison(y_true_a, y_pred_a, label_a,
+                       y_true_b, y_pred_b, label_b,
+                       class_names):
+    """Grouped bar chart comparing per-class F1 between two models."""
+    f1_a = extract_f1_per_class(y_true_a, y_pred_a, class_names)
+    f1_b = extract_f1_per_class(y_true_b, y_pred_b, class_names)
+
+    x    = np.arange(len(class_names))
+    w    = 0.35
+    vals_a = [f1_a[c] for c in class_names]
+    vals_b = [f1_b[c] for c in class_names]
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    b1 = ax.bar(x - w/2, vals_a, w, label=label_a, color="#aec7e8", edgecolor="white")
+    b2 = ax.bar(x + w/2, vals_b, w, label=label_b, color="#1f77b4", edgecolor="white")
+
+    for bar in list(b1) + list(b2):
+        ax.text(bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.005,
+                f"{bar.get_height():.3f}",
+                ha="center", va="bottom", fontsize=8)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(class_names)
+    ax.set_ylabel("F1 score")
+    ax.set_ylim(0, 1.05)
+    ax.set_title("Per-class F1 score: Baseline vs. Tuned MLP")
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+plot_f1_comparison(
+    y_true_base, y_pred_base, "Baseline",
+    y_true_best, y_pred_best, "Tuned",
+    class_names,
+)
+```
+
+The per-class F1-score comparison confirms that tuning mainly improves the No Diabetes class, leaves Diabetes almost unchanged, and does not improve Prediabetes, which remains the weakest class by a large margin.
+
+#### Predicted probability distributions
+
+Beyond the final predicted class, it is also useful to examine the probabilities the model assigns to each class for every observation in the test set. These distributions show how confidently the network separates true members of a class from the rest. In general, better discrimination is reflected by a clearer separation between the two groups, while strong overlap indicates uncertainty and confusion between classes.
+
+```{python}
+def plot_probability_distributions(model, loader, device, class_names):
+    """For each class, plot the predicted-probability distribution split by true label."""
+    model.eval()
+    all_probs, all_true = [], []
+
+    with torch.no_grad():
+        for x, y in loader:
+            logits = model(x.to(device))
+            probs  = torch.softmax(logits, dim=1).cpu().numpy()
+            all_probs.append(probs)
+            all_true.extend(y.numpy())
+
+    all_probs = np.vstack(all_probs)          # shape: (N, num_classes)
+    all_true  = np.array(all_true)
+    n_classes = len(class_names)
+
+    fig, axes = plt.subplots(1, n_classes, figsize=(5 * n_classes, 4), sharey=False)
+
+    colours = ["#2ca02c", "#d62728"]           # green = belongs, red = does not
+
+    for cls_idx, (ax, cls_name) in enumerate(zip(axes, class_names)):
+        probs_cls  = all_probs[:, cls_idx]
+        mask_pos   = all_true == cls_idx
+        mask_neg   = ~mask_pos
+
+        ax.hist(probs_cls[mask_neg], bins=30, density=True,
+                alpha=0.6, color=colours[1], label=f"True ≠ {cls_name}", edgecolor="white")
+        ax.hist(probs_cls[mask_pos], bins=30, density=True,
+                alpha=0.7, color=colours[0], label=f"True = {cls_name}", edgecolor="white")
+
+        ax.set_title(f"P(class = {cls_name})", fontsize=10)
+        ax.set_xlabel("Predicted probability")
+        ax.set_ylabel("Density")
+        ax.legend(fontsize=8)
+
+    plt.suptitle("Predicted probability distributions – Tuned MLP", fontsize=12)
+    plt.tight_layout()
+    plt.show()
+
+plot_probability_distributions(best_model, test_loader_best, device, class_names)
+```
+
+The plots show that the model separates No Diabetes and Diabetes reasonably well. For these two classes, observations that truly belong to the class tend to receive higher predicted probabilities than those that do not, although there is still some overlap, which explains the remaining classification errors. In contrast, the Prediabetes panel shows almost no separation: predicted probabilities are concentrated near zero for both groups, and true prediabetic cases rarely receive high probability. This confirms that the model is not learning this class well and tends to absorb it into the other two categories rather than identifying it as a distinct intermediate group.
+
+```{python}
+def plot_predicted_vs_true_distribution(y_true, y_pred, class_names, title="Tuned MLP"):
+    """Bar chart comparing true vs predicted class frequencies."""
+    n   = len(class_names)
+    x   = np.arange(n)
+    w   = 0.35
+
+    true_counts = np.array([(y_true == i).sum() for i in range(n)])
+    pred_counts = np.array([(y_pred == i).sum() for i in range(n)])
+    total       = len(y_true)
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    b1 = ax.bar(x - w/2, true_counts / total, w,
+                label="True distribution", color="#2ca02c", alpha=0.8, edgecolor="white")
+    b2 = ax.bar(x + w/2, pred_counts / total, w,
+                label="Predicted distribution", color="#ff7f0e", alpha=0.8, edgecolor="white")
+
+    for bar in list(b1) + list(b2):
+        ax.text(bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.005,
+                f"{bar.get_height():.2f}",
+                ha="center", va="bottom", fontsize=8)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(class_names)
+    ax.set_ylabel("Proportion of test set")
+    ax.set_ylim(0, 1.0)
+    ax.set_title(f"True vs. predicted class distribution – {title}")
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+plot_predicted_vs_true_distribution(y_true_best, y_pred_best, class_names)
+```
+
+This plot shows that the tuned model’s predicted class distribution differs noticeably from the true distribution of the test set. In particular, it underpredicts No Diabetes (62% predicted vs. 84% true) and overpredicts Diabetes (32% predicted vs. 14% true). Prediabetes is also predicted slightly more often than it actually appears, but it remains a very small class overall. This confirms what was already visible in the confusion matrix: the model tends to assign too many observations to the disease classes, especially Diabetes, at the expense of the No Diabetes class.
+
+### Conclusions
+
+::: callout-important
+**Final Conclusion and Model Assessment: Neural Networks**
+
+Overall, the tuned MLP improves upon the baseline in terms of overall classification performance and achieves a clearer separation between the **No Diabetes** and **Diabetes** classes. However, all evaluation results consistently highlight the same limitation: the model is still unable to identify **Prediabetes** reliably as a distinct intermediate category. The confusion matrices, per-class F1-scores, predicted probability distributions, and class-distribution comparison all indicate that the model concentrates most of its predictive confidence on the two extreme classes, while **Prediabetes** remains poorly separated and is frequently absorbed into one of the other two.
+
+Therefore, although the tuned model represents a clear improvement over the baseline and captures meaningful predictive structure, its performance is still not fully adequate for a clinically balanced three-class classification task. In particular, its weak detection of **Prediabetes** and the persistence of clinically important false negatives suggest that further refinement would be necessary before considering it a robust diagnostic support model.
+:::
+
+## 3.5. SHAP
+
+After building and tuning our neural network, we want to go beyond accuracy metrics and understand why the model makes the predictions it does. **SHAP** (SHapley Additive exPlanations) provides a way to assign each input feature an importance value for a particular prediction, grounded in cooperative game theory. Concretely, the SHAP value for a feature tells us how much that feature shifted the model's output away from the average prediction: a large positive value means the feature pushed the prediction towards a given class; a large negative value pushed it away.
+
+For neural networks on tabular data, we use `shap.KernelExplainer`, which is fully model-agnostic: it treats the network as a black box, perturbs the input features, and estimates how much each feature shifts the output away from the baseline. While slower than gradient-based methods, it is the most robust choice here because gradient approaches (`DeepExplainer`, `GradientExplainer`) can produce near-zero attributions for `PyTorch` MLPs that use `nn.Sequential` with `Dropout` and `ReLU`. We pass a small stratified background sample (50 per class) to set the baseline expectation, then compute SHAP values on 100 randomly selected test observations.
+
+```{python}
+# Setup and SHAP computation
+# Import SHAP 
+import shap
+shap.initjs()
+
+# Feature names 
+feature_names = list(pd.read_csv("train_up.csv").drop(columns=["Diabetes_012"]).columns)
+
+#  Scale the data 
+X_train_scaled = scaler_best.transform(X_train)
+X_test_scaled  = scaler_best.transform(X_test)
+
+# Model wrapper for KernelExplainer 
+# KernelExplainer is model-agnostic: it treats the network as a black box and
+# estimates SHAP values by perturbing inputs. 
+# The wrapper converts numpy arrays into torch tensors and returns softmax probs.
+def model_predict(X_numpy):
+    """numpy (N, 21) → numpy (N, 3) softmax probabilities."""
+    best_model.eval()
+    with torch.no_grad():
+        t      = torch.tensor(X_numpy, dtype=torch.float32).to(device)
+        logits = best_model(t)
+        probs  = torch.softmax(logits, dim=1).cpu().numpy()
+    return probs
+
+# Stratified background: 50 samples per class (150 total) 
+np.random.seed(seed)
+bg_idx = []
+for cls in range(len(class_names)):
+    cls_idx = np.where(y_train == cls)[0]
+    bg_idx.append(np.random.choice(cls_idx, size=50, replace=False))
+bg_background = X_train_scaled[np.concatenate(bg_idx)]   # shape (150, 21)
+
+# Small test subset: 100 samples for explanation 
+# KernelExplainer is slow on large sets; 100 samples gives stable global plots.
+np.random.seed(seed)
+test_idx       = np.random.choice(len(X_test_scaled), size=100, replace=False)
+X_test_explain = X_test_scaled[test_idx]                  # shape (100, 21)
+y_test_explain = y_test[test_idx]
+
+# Fit explainer and compute SHAP values 
+explainer   = shap.KernelExplainer(model_predict, bg_background)
+# shap_values: list of 3 arrays (one per output class), each shape (100, 21)
+shap_values = explainer.shap_values(X_test_explain, nsamples=256, silent=True)
+
+# Normalize to list of numpy arrays regardless of shap version
+if isinstance(shap_values, np.ndarray) and shap_values.ndim == 3:
+    shap_values = [shap_values[:, :, i] for i in range(shap_values.shape[2])]
+shap_values = [sv if isinstance(sv, np.ndarray) else np.array(sv)
+               for sv in shap_values]
+
+print("SHAP values shape per class:", [s.shape for s in shap_values])
+nonzero = [(np.abs(sv) > 1e-6).any(axis=0).sum() for sv in shap_values]
+print("Non-zero features per class:", nonzero)
+```
+
+### Global feature importance
+
+The mean absolute SHAP value across all test observations and all classes is the simplest global importance metric. It tells us which features, on average, have the most influence on the model's output.
+
+```{python}
+def plot_shap_global_importance(shap_values, feature_names, class_names, top_n=15):
+    """Bar chart of mean |SHAP| per feature, aggregated over all classes."""
+    # Mean |SHAP| over test samples for each class, then average over classes
+    mean_abs = np.mean(
+        np.stack([np.abs(sv).mean(axis=0) for sv in shap_values], axis=0),
+        axis=0,
+    )
+    order = np.argsort(mean_abs)[-top_n:]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.barh(
+        np.array(feature_names)[order],
+        mean_abs[order],
+        color="#1f77b4", edgecolor="white",
+    )
+    ax.set_xlabel("Mean |SHAP value| (averaged over all classes and test samples)")
+    ax.set_title(f"Top-{top_n} most important features – Tuned MLP")
+    plt.tight_layout()
+    plt.show()
+
+plot_shap_global_importance(shap_values, feature_names, class_names, top_n=15)
+```
+
+The SHAP analysis identifies the variables with the greatest overall influence on the tuned MLP’s predictions. `GenHlth` (general health self-rating) is the most important feature by a clear margin, followed by `Age`, `BMI`, `HighBP`, and `HighChol`. This indicates that the model relies mainly on general health status, age, body composition, and cardiovascular risk factors when predicting diabetes status, which is consistent with clinical knowledge about diabetes risk. Features such as `MentHlth`, `PhysHlth`, and lifestyle-related indicators like `Smoker` and `PhysActivity` also contribute, although their average impact is more moderate.
+
+### Per-class diverging bar charts
+
+These class-specific SHAP plots show not only which features matter most for each class, but also in which direction they affect the predicted probability. For each feature, the bars summarize the average SHAP contribution when the feature takes high values (red) or low values (blue). Positive SHAP values increase the probability of the class, while negative values decrease it. This makes it possible to see how the same variable can push predictions differently depending on both its value and the class being considered.
+
+```{python}
+def plot_shap_diverging_per_class(shap_values, X_test_explain, feature_names,
+                                   class_names, top_n=12):
+    """Diverging bar chart of mean SHAP split by high/low feature value per class.
+
+    For each top feature:
+      - Red bar  : mean SHAP across observations where feature > median  (high value)
+      - Blue bar : mean SHAP across observations where feature <= median (low value)
+    Bars extend left (negative effect) or right (positive effect).
+    """
+    for cls_idx, cls_name in enumerate(class_names):
+        sv      = shap_values[cls_idx]            # (n_samples, n_features)
+        X       = X_test_explain                  # (n_samples, n_features)
+        names   = np.array(feature_names)
+
+        # Rank by mean |SHAP|
+        mean_abs = np.abs(sv).mean(axis=0)
+        top_idx  = np.argsort(mean_abs)[-top_n:][::-1]   # best -> worst
+
+        fig, ax = plt.subplots(figsize=(9, 5))
+        y_pos   = np.arange(len(top_idx))
+
+        for rank, feat_i in enumerate(top_idx):
+            median    = np.median(X[:, feat_i])
+            high_mask = X[:, feat_i] > median
+            low_mask  = ~high_mask
+
+            mean_high = sv[high_mask, feat_i].mean() if high_mask.any() else 0.0
+            mean_low  = sv[low_mask,  feat_i].mean() if low_mask.any()  else 0.0
+
+            ax.barh(rank, mean_high, color="#d62728", alpha=0.85,
+                    label="High value" if rank == 0 else "_nolegend_")
+            ax.barh(rank, mean_low,  color="#1f77b4", alpha=0.85,
+                    label="Low value"  if rank == 0 else "_nolegend_")
+
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(names[top_idx], fontsize=9)
+        ax.axvline(0, color="black", linewidth=0.8)
+        ax.set_xlabel("Mean SHAP value  <- decreases probability  |  increases probability ->")
+        ax.set_title(f"Feature impact on P(class = {cls_name})\n"
+                     f"Red = high feature value, Blue = low feature value", fontsize=10)
+        ax.legend(loc="lower right", fontsize=8)
+        plt.tight_layout()
+        plt.show()
+
+plot_shap_diverging_per_class(shap_values, X_test_explain, feature_names, class_names)
+```
+
+For Diabetes, the most influential features are `GenHlth`, `HighBP`, `BMI`, `Age`, and `HighChol`. In general, high values of these variables push the prediction toward the diabetes class, while low values push it away. This is clinically coherent: worse general health, higher BMI, older age, high blood pressure, and high cholesterol all increase the model’s tendency to predict diabetes.
+
+For No Diabetes, the pattern is largely reversed. Low values of `GenHlth`, `BMI`, `Age`, `HighBP`, and `HighChol` increase the probability of belonging to the non-diabetic class, whereas high values reduce it. This again suggests that the model is learning a consistent contrast between healthier and higher-risk profiles.
+
+For Prediabetes, the effects are weaker and less structured. Many features push the prediction only slightly, and several variables contribute in mixed directions. This is consistent with the earlier results: the model has difficulty identifying prediabetes as a distinct class and tends to place those cases closer to either No Diabetes or Diabetes instead.
